@@ -44,6 +44,16 @@ class LapSummary:
 
 
 @dataclass
+class HRZoneDistribution:
+    z1_time_seconds: int = 0
+    z2_time_seconds: int = 0
+    z3_time_seconds: int = 0
+    z4_time_seconds: int = 0
+    z5_time_seconds: int = 0
+    z6_time_seconds: int = 0
+
+
+@dataclass
 class SessionSummary:
     start_time: Optional[datetime] = None
     elapsed_time: Optional[float] = None
@@ -61,6 +71,9 @@ class SessionSummary:
     avg_temperature: Optional[float] = None
     min_temperature: Optional[float] = None
     max_temperature: Optional[float] = None
+    efficiency_factor: Optional[float] = None
+    aerobic_decoupling_pct: Optional[float] = None
+    hr_zones: Optional[HRZoneDistribution] = None
 
 
 @dataclass

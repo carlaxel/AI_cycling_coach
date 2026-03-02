@@ -168,10 +168,13 @@ def _interval_execution_section(ia: IntervalAnalysis, ftp: int) -> list[str]:
 
     # Per-interval compliance table
     has_hr = any(w.avg_heart_rate is not None for w in wi)
+    has_ef = any(getattr(w, "efficiency_factor", None) is not None for w in wi)
 
     header = ["Interval", "Time", "Avg W", "Target", "Deviation"]
     if has_hr:
         header.append("Avg HR")
+    if has_ef:
+        header.append("EF")
     lines.append("| " + " | ".join(header) + " |")
     lines.append("| " + " | ".join(["---"] * len(header)) + " |")
 
@@ -191,6 +194,8 @@ def _interval_execution_section(ia: IntervalAnalysis, ftp: int) -> list[str]:
         ]
         if has_hr:
             row.append(f"{w.avg_heart_rate} bpm" if w.avg_heart_rate else "—")
+        if has_ef:
+            row.append(f"{w.efficiency_factor:.2f}" if getattr(w, "efficiency_factor", None) else "—")
         lines.append("| " + " | ".join(row) + " |")
     lines.append("")
 
@@ -628,6 +633,42 @@ def generate_session_report(result: AnalysisResult, source_filename: str) -> str
         if result.normalized_power:
             lines.append(f"| NP W/kg | {result.normalized_power / result.weight:.2f} W/kg |")
     lines.append("")
+
+    # Aerobic Profile (conditional)
+    has_ef = getattr(s, "efficiency_factor", None) is not None
+    has_decoupling = getattr(s, "aerobic_decoupling_pct", None) is not None
+    has_hr_zones = getattr(s, "hr_zones", None) is not None
+
+    if has_ef or has_decoupling or has_hr_zones:
+        lines += ["## Aerobic Profile", ""]
+        if has_ef or has_decoupling:
+            lines += ["| Metric | Value |", "|---|---|"]
+            if has_ef:
+                lines.append(f"| Efficiency Factor (EF) | {s.efficiency_factor:.2f} |")
+            if has_decoupling:
+                lines.append(f"| Aerobic Decoupling | {s.aerobic_decoupling_pct:+.1f}% |")
+            lines.append("")
+        
+        if has_hr_zones:
+            hrz = s.hr_zones
+            z_times = [
+                ("Z1", hrz.z1_time_seconds),
+                ("Z2", hrz.z2_time_seconds),
+                ("Z3", hrz.z3_time_seconds),
+                ("Z4", hrz.z4_time_seconds),
+                ("Z5", hrz.z5_time_seconds),
+            ]
+            if hasattr(hrz, "z6_time_seconds") and hrz.z6_time_seconds > 0:
+                z_times.append(("Z6", hrz.z6_time_seconds))
+            
+            total_hr_time = sum(t for _, t in z_times)
+            if total_hr_time > 0:
+                lines += ["### Heart Rate Zones", ""]
+                lines += ["| Zone | Time | % |", "|---|---|---|"]
+                for z_name, z_time in z_times:
+                    pct = z_time / total_hr_time * 100
+                    lines.append(f"| {z_name} | {_fmt_duration(z_time)} | {pct:.1f}% |")
+                lines.append("")
 
     # Heart Rate (conditional)
     if s.avg_heart_rate or s.max_heart_rate:

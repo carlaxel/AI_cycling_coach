@@ -12,26 +12,9 @@ After reviewing the full codebase, generated reports, and data available from FI
 
 ---
 
-## Rank 2: `fitness-fatigue-model`
 
-**What:** Rules for interpreting the Performance Management Chart (PMC) — CTL, ATL, TSB computation, ramp rate thresholds, form/freshness assessment.
 
-**Why this athlete:** The coach agent already references CTL/ATL/TSB numbers ("Sustainable CTL: 55-80", "Ramp rate: no more than 5-8 points/month") but the code computes none of them. With 9 weeks of data (~40 sessions), CTL values are now meaningful. The Thailand week (W05, 937 TSS) followed by a single-session W07 is a textbook overreach-recovery pattern that the code cannot detect.
-
-**Unlocks:**
-- Daily CTL (42-day EMA), ATL (7-day EMA), TSB (CTL - ATL)
-- Ramp rate tracking with warnings when exceeding safe limits
-- Recovery week recommendations when TSB drops below -20/-30
-- Form predictions ("current TSB is -15, expect reduced capacity")
-- Block analysis: CTL trend line, overreach/absorption period identification
-
-**Code changes:** Significant — needs a persistent state file (daily TSS history as JSON/CSV) since CTL spans across weekly `report.py` invocations. New module (e.g., `fitness_model.py`).
-
-**Dependencies:** Requires historical TSS data. 9 weeks is enough to seed the model. No HR dependency.
-
----
-
-## Rank 3: `power-duration-profiling`
+## Rank 4: `power-duration-profiling`
 
 **What:** Rules for interpreting power-duration curves — PR tracking, phenotype classification, progress comparison, FTP validation from the curve.
 
@@ -50,7 +33,7 @@ After reviewing the full codebase, generated reports, and data available from FI
 
 ---
 
-## Rank 4: `heart-rate-aerobic-efficiency`
+## Rank 3: `heart-rate-aerobic-efficiency`
 
 **What:** Rules for HR zone analysis, aerobic decoupling (power:HR drift in steady-state efforts), Efficiency Factor (NP/avg HR), and cardiac drift detection.
 
@@ -64,7 +47,7 @@ After reviewing the full codebase, generated reports, and data available from FI
 
 **Code changes:** Moderate — new analysis functions for EF, decoupling (requires identifying sustained steady-state segments). Conditional report sections.
 
-**Dependencies:** **Requires HR data.** Currently intermittent (present W01-W05, absent W08-W09). High-value when sensor is connected, useless when not. Ranked 4th due to this gap — moves to rank 2 once HR is consistently available.
+**Dependencies:** **Requires HR data.** Highly reliable historically (present in 241 of 251 sessions in 2025). The intermittent missing data (e.g. W08-W09) is an anomaly, not the norm. Given the solid baseline data (known LTHR, max HR, and normal Z2 HR ranges), this is now high-value and ready for implementation. Moved up in priority.
 
 ---
 
@@ -92,13 +75,13 @@ After reviewing the full codebase, generated reports, and data available from FI
 |------|-------|-------------|-----------|------------|
 | 1 | `interval-execution-analysis` | Moderate | No (enhanced w/ HR) | High — every SST/threshold session |
 | 2 | `fitness-fatigue-model` | Significant | No | High — CTL/ATL immediately computable |
-| 3 | `power-duration-profiling` | Moderate | No | Medium-high — PR tracking starts paying off |
-| 4 | `heart-rate-aerobic-efficiency` | Moderate | Yes | Medium — blocked by sensor intermittency |
+| 3 | `heart-rate-aerobic-efficiency` | Moderate | Yes | High — historical data proves sensor is actually very reliable (96% uptime in 2025). |
+| 4 | `power-duration-profiling` | Moderate | No | Medium-high — PR tracking starts paying off |
 | 5 | `session-matching` | Moderate-significant | No (enhanced w/ HR) | Medium — value grows with data volume |
 
 ## Recommended Implementation Order
 
-Start with **1 → 2 → 3** (all power-only, immediately useful). Add **4** once HR sensor is reconnected. Build **5** after 4-6 months of data when workout repetition makes matching meaningful.
+Start with **1 → 2 → 3** (now including HR efficiency since data is reliable). Add **4** alongside or next. Build **5** after 4-6 months of data when workout repetition makes matching meaningful.
 
 ## Key Files That Would Be Modified
 

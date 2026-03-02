@@ -1,3 +1,8 @@
+---
+name: fitness-fatigue-model
+description: Rules for interpreting the Performance Management Chart (PMC) — CTL, ATL, TSB computation, ramp rate thresholds, form assessment, and recovery recommendations. Use when reasoning about training load, fatigue state, or periodization decisions.
+---
+
 # Fitness-Fatigue Model (PMC)
 
 Rules for interpreting the Performance Management Chart — CTL, ATL, TSB computation, ramp rate thresholds, form assessment, and recovery recommendations.

@@ -1,9 +1,20 @@
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
-from .models import WorkoutData
+from .models import WorkoutData, HRZoneDistribution
+
+def _load_athlete_config() -> dict:
+    try:
+        path = Path(__file__).parent.parent / "athlete.json"
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
 
 # Coggan power zones as (lower_bound_pct_ftp, upper_bound_pct_ftp, name)
 COGGAN_ZONES = [
@@ -38,6 +49,7 @@ class WorkInterval:
     in_target: bool
     elapsed_time: Optional[float] = None
     avg_heart_rate: Optional[int] = None
+    efficiency_factor: Optional[float] = None
 
 
 @dataclass
@@ -100,6 +112,9 @@ def _analyze_intervals(workout: WorkoutData, ftp: int) -> Optional[IntervalAnaly
         dev_pct = dev_watts / target_mid * 100 if target_mid > 0 else 0.0
         in_target = lap.target_power_low <= lap.avg_power <= t_high
 
+        np_val = lap.normalized_power if lap.normalized_power is not None else lap.avg_power
+        ef = round(np_val / lap.avg_heart_rate, 3) if np_val and lap.avg_heart_rate and lap.avg_heart_rate > 0 else None
+
         work_intervals.append(WorkInterval(
             lap_number=lap.lap_number,
             avg_power=lap.avg_power,
@@ -110,6 +125,7 @@ def _analyze_intervals(workout: WorkoutData, ftp: int) -> Optional[IntervalAnaly
             in_target=in_target,
             elapsed_time=lap.elapsed_time,
             avg_heart_rate=lap.avg_heart_rate,
+            efficiency_factor=ef,
         ))
 
     powers = [wi.avg_power for wi in work_intervals]
@@ -149,6 +165,10 @@ def _analyze_intervals(workout: WorkoutData, ftp: int) -> Optional[IntervalAnaly
 
 def analyze(workout: WorkoutData, ftp: Optional[int] = None, weight: Optional[float] = None) -> AnalysisResult:
     result = AnalysisResult(workout=workout, ftp=ftp, weight=weight)
+
+    athlete_conf = _load_athlete_config()
+    lthr = athlete_conf.get("lthr")
+    max_hr = athlete_conf.get("max_hr")
 
     power_values = [r.power for r in workout.records if r.power is not None]
     if not power_values:
@@ -196,5 +216,56 @@ def analyze(workout: WorkoutData, ftp: Optional[int] = None, weight: Optional[fl
 
         # Interval execution analysis (structured workouts only)
         result.interval_analysis = _analyze_intervals(workout, ftp)
+
+    # General Efficiency Factor
+    if result.normalized_power and workout.session.avg_heart_rate and workout.session.avg_heart_rate > 0:
+        workout.session.efficiency_factor = round(result.normalized_power / workout.session.avg_heart_rate, 3)
+
+    # HR Zone Distribution (5-zone model based on LTHR)
+    if lthr:
+        hr_values = [r.heart_rate for r in workout.records if r.heart_rate is not None]
+        if hr_values:
+            hr_zones = HRZoneDistribution()
+            for hr in hr_values:
+                pct = hr / lthr
+                if pct < 0.68:
+                    hr_zones.z1_time_seconds += 1
+                elif pct < 0.84:
+                    hr_zones.z2_time_seconds += 1
+                elif pct < 0.95:
+                    hr_zones.z3_time_seconds += 1
+                elif pct < 1.06:
+                    hr_zones.z4_time_seconds += 1
+                else:
+                    hr_zones.z5_time_seconds += 1
+            workout.session.hr_zones = hr_zones
+
+    # True Aerobic Decoupling with strict guards
+    # Guards: session > 40m, VI <= 1.05, IF between 0.55 and 0.85
+    duration = workout.session.timer_time or workout.session.elapsed_time
+    if duration and duration >= 40 * 60:
+        vi = result.variability_index
+        if_val = result.intensity_factor
+        if vi and vi <= 1.05 and if_val and 0.55 <= if_val <= 0.85:
+            valid_recs = [r for r in workout.records if r.power is not None and r.heart_rate is not None]
+            if len(valid_recs) >= 1200:  # at least ~20 mins of valid data to be safe
+                half_idx = len(valid_recs) // 2
+                
+                def calc_half_ef(recs):
+                    powers = [r.power for r in recs]
+                    hrs = [r.heart_rate for r in recs]
+                    if not powers or not hrs: return 0
+                    
+                    series = pd.Series(powers, dtype=float)
+                    np_val = float((series.rolling(window=30, min_periods=1).mean()**4).mean() ** 0.25)
+                    avg_hr = sum(hrs) / len(hrs)
+                    return np_val / avg_hr if avg_hr > 0 else 0
+                
+                ef1 = calc_half_ef(valid_recs[:half_idx])
+                ef2 = calc_half_ef(valid_recs[half_idx:])
+                
+                if ef1 > 0 and ef2 > 0:
+                    drift = ((ef1 - ef2) / ef1) * 100
+                    workout.session.aerobic_decoupling_pct = round(drift, 1)
 
     return result

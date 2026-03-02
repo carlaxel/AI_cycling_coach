@@ -19,7 +19,7 @@ When the user says they have new files:
 
 When generating workout plan files (e.g. in `workout_plans/`):
 - Each session must include an **intervals.icu workout builder block** — plain text, copy-paste ready for direct import.
-- Use `%` of FTP for power targets, zone names (`Z2`, `Z4`) where appropriate, and `Nx` repeat syntax.
+- Use `%` of FTP for all power targets (never zone names), and `Nx` repeat syntax.
 - Follow session structure from the athlete profile skill (warm-up, no planned cool-down).
 - For full formatting rules and templates, invoke the `session-creation` skill.
 

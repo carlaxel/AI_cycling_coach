@@ -1,3 +1,8 @@
+---
+name: interval-execution-analysis
+description: Rules for interpreting structured interval execution quality — fade detection, consistency scoring, compliance grading, and HR cost analysis. Use when analyzing structured workouts with defined work intervals (SST, threshold, VO2max).
+---
+
 # Interval Execution Analysis
 
 Rules for interpreting structured interval execution quality — fade detection, consistency scoring, compliance grading, and HR cost analysis.
