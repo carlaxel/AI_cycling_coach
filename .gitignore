@@ -1,0 +1,37 @@
+# Personal/sensitive training data
+fit_files/
+data/
+reports/
+workout_plans/
+athlete.json
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environment
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local env/secrets
+.env
+.env.local
+
+# Claude local settings and personal athlete profile
+.claude/settings.local.json
+.claude/skills/cycling-athlete-profile/
