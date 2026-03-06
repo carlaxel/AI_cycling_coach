@@ -1,0 +1,12 @@
+{
+  "ide": {
+    "enabled": true
+  },
+ "experimental": {
+    "plan": true,
+    "enableAgents": true
+  },
+  "model": {
+    "name": "gemini-3.1-pro-preview"
+  }
+}

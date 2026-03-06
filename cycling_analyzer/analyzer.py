@@ -48,6 +48,7 @@ class WorkInterval:
     deviation_pct: float
     in_target: bool
     elapsed_time: Optional[float] = None
+    timer_time: Optional[float] = None
     avg_heart_rate: Optional[int] = None
     efficiency_factor: Optional[float] = None
 
@@ -124,6 +125,7 @@ def _analyze_intervals(workout: WorkoutData, ftp: int) -> Optional[IntervalAnaly
             deviation_pct=round(dev_pct, 1),
             in_target=in_target,
             elapsed_time=lap.elapsed_time,
+            timer_time=lap.timer_time,
             avg_heart_rate=lap.avg_heart_rate,
             efficiency_factor=ef,
         ))

@@ -7,11 +7,13 @@ The AI must strictly follow this 4-Phase sequence of operations when interacting
 
 1. **Ingestion & Raw Generation:**
    - Run `./inbox.sh` to move `.fit` files to `fit_files/unprocessed/`.
-   - Run `uv run python report.py week` to generate the raw `session_YYYY-MM-DD_HH-MM.md` files.
+   - Run `uv run python report.py week` to process all new files, generate the raw `session_YYYY-MM-DD.md` reports, and update/create the `weekly_summary.md` in the `reports/YYYY/YYYY-WXX/` directory.
+   - *Note on `.gitignore`:* The `reports/` and `workout_plans/` directories are ignored by git. You must disable gitignore filtering in your file/search tools (e.g., set `respect_git_ignore: false` or `no_ignore: true`) or use shell commands (`ls`, `cat`, `find`) to view them.
+
 2. **Intent & Compliance Check:**
    - Activate the `cycling-athlete-profile` skill to establish the athlete's current FTP, weight, and power zones.
    - Search the `workout_plans/` directory (or workspace root) for the active training plan (files are typically structured as 3-week blocks or single-week plans, e.g., `YYYY_monthXX-XXmd`).
-   - Locate the specific day's prescribed workout within the active plan.
+   - Locate the specific day's prescribed workout within the active plan (with matching dates).
    - Compare executed laps against prescribed `intervals.icu` blocks (did they hit W/kg or %FTP targets? duration? recovery?).
 3. **Skill-Based Deep Dive:**
    - **For Structured Work (SST, Threshold, VO2Max):** Activate `interval-execution-analysis` skill to calculate Fade Index, Cardiac Drift, and evaluate CV (pacing consistency).
@@ -25,17 +27,17 @@ The AI must strictly follow this 4-Phase sequence of operations when interacting
    - **Include:** 1. Plan Compliance, 2. Execution Quality (applying IF/TSS/Muddle rules), 3. Physiological Response & Block Context.
 
 ## Phase 2: Weekly Synthesis & Coaching Critique
-**Trigger:** All files for the week are processed, today is Sunday, or user requests the weekly wrap-up.
+**Trigger:** Phase 1 is complete and the user requests the weekly wrap-up (usually on Sunday).
 
 1. **Data Roll-Up:** 
-   - Read the `session_*.md` files for the week, focusing on the pre-computed "Qualitative Analysis & Coach's Notes". Do not recalculate session metrics.
+   - Read the `session_*.md` files for the week, focusing on the pre-computed "Qualitative Analysis & Coach's Notes", and the `weekly_summary.md`.
 2. **Fatigue & Load Assessment:** 
    - Activate `fitness-fatigue-model` skill to evaluate CTL ramp rate (target 3–7 pts/week) and ending TSB (Form). Check for appropriate fatigue vs. overreaching.
 3. **Subagent Invocation (`cycling-coach`):**
-   - Activate the `cycling-athlete-profile` skill to establish the athlete's goals, FTP, and training philosophy.
+   - Activate the `cycling-athlete-profile` skill to establish the athlete's goals, FTP, weight, and training philosophy.
    - Locate the active 3-week training plan and summarize it into a simplified format (focusing on key workouts, target progressions, and block goals).
-   - Provide the week's qualitative session notes, PMC data, athlete profile context, and the summarized 3-week plan to the `cycling-coach` subagent.
-   - The subagent writes the Weekly Summary (must include chronological links to sessions, Critique, Insights, and Next Week recommendations).
+   - Provide the week's qualitative session notes, the automated `weekly_summary.md` stats, PMC data, athlete profile context, and the summarized 3-week plan to the `cycling-coach` subagent.
+   - The subagent writes the **Weekly Critique** (must include chronological links to sessions, Critique, Insights, and Next Week recommendations) and appends it to the bottom of the `weekly_summary.md`.
 
 ## Phase 3: Forward Planning Adjustment
 **Trigger:** After weekly synthesis is complete and the user requests checking the plan for next week.

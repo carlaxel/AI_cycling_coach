@@ -27,7 +27,8 @@ cycling_power_ai/
 ├── report.py               # CLI: generate session, week, and block reports
 ├── analyze.py              # CLI: quick analysis of a single .fit file
 ├── inbox.sh                # Helper: move .fit files from ~/Downloads into fit_files/unprocessed/
-├── requirements.txt
+├── pyproject.toml
+├── uv.lock
 ├── athlete.json            # ← NOT included (personal data — create manually, see below)
 ├── fit_files/              # ← NOT included (personal data — create manually, see below)
 │   ├── unprocessed/        #   Drop new .fit files here
@@ -46,16 +47,12 @@ cycling_power_ai/
 ### Prerequisites
 
 - Python 3.11+
-- [`uv`](https://github.com/astral-sh/uv) (recommended) or `pip`
+- [`uv`](https://github.com/astral-sh/uv)
 
 ### Install
 
 ```bash
-# With uv (recommended)
 uv sync
-
-# Or with pip
-pip install -r requirements.txt
 ```
 
 ### Files you need to create

@@ -23,7 +23,7 @@ def week_label(dt: datetime) -> str:
 
 
 def session_filename(dt: datetime) -> str:
-    return f"session_{dt.strftime('%Y-%m-%d_%H-%M')}.md"
+    return f"session_{dt.strftime('%Y-%m-%d')}.md"
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +153,7 @@ def _interval_execution_section(ia: IntervalAnalysis, ftp: int) -> list[str]:
     has_hr = any(w.avg_heart_rate is not None for w in wi)
     has_ef = any(getattr(w, "efficiency_factor", None) is not None for w in wi)
 
-    header = ["Interval", "Time", "Avg W", "Target", "Deviation"]
+    header = ["Interval", "Time", "Paused", "Avg W", "Target", "Deviation"]
     if has_hr:
         header.append("Avg HR")
     if has_ef:
@@ -168,9 +168,14 @@ def _interval_execution_section(ia: IntervalAnalysis, ftp: int) -> list[str]:
         else:
             tgt = f"{w.target_low} W {status}"
         dev_str = f"{w.deviation_watts:+.0f} W ({w.deviation_pct:+.1f}%)"
+        
+        paused_sec = (w.elapsed_time - w.timer_time) if w.elapsed_time is not None and w.timer_time is not None else 0
+        paused_str = fmt_duration(paused_sec, show_seconds=True) if paused_sec > 0 else "0s"
+
         row = [
             f"Lap {w.lap_number + 1}",
-            _fmt_duration(w.elapsed_time),
+            _fmt_duration(w.timer_time),
+            paused_str,
             f"{w.avg_power:.0f} W",
             tgt,
             dev_str,
@@ -719,19 +724,24 @@ def generate_session_report(
     dt = s.start_time
     indoor = _is_indoor(result)
     venue = "Indoor" if indoor else "Outdoor"
-    header_dt = dt.strftime("%Y-%m-%d %H:%M") if dt else "Unknown"
+    header_dt = dt.strftime("%Y-%m-%d") if dt else "Unknown"
 
     lines: list[str] = [f"# Session Report — {header_dt} [{venue}]", ""]
-    lines += [f"*Source: `{source_filename}`*", ""]
+    if source_filename:
+        lines += [f"*Source: `{source_filename}`*", ""]
 
-    # Session Stats
     lines += ["## Session Stats", ""]
     lines += ["| Field | Value |", "|---|---|"]
-    lines.append(f"| Date | {dt.strftime('%Y-%m-%d %H:%M') if dt else '—'} |")
+    lines.append(f"| Date | {dt.strftime('%Y-%m-%d') if dt else '—'} |")
     lines.append(f"| Venue | {venue} |")
     lines.append(f"| Sport | {_v(s.sport)}{f' / {s.sub_sport}' if s.sub_sport else ''} |")
     lines.append(f"| Elapsed Duration | {_fmt_duration(s.elapsed_time)} |")
     lines.append(f"| Timer Duration | {_fmt_duration(s.timer_time)} |")
+    
+    session_paused = (s.elapsed_time - s.timer_time) if s.elapsed_time is not None and s.timer_time is not None else 0
+    if session_paused > 0:
+        lines.append(f"| Paused Time | {fmt_duration(session_paused, show_seconds=True)} |")
+
     lines.append(f"| Distance | {_fmt_dist(s.distance)} |")
     lines.append(f"| Calories | {_v(s.calories, suffix=' kcal')} |")
     lines.append(f"| Total Work | {_v(s.total_work_kj, fmt='{:.0f}', suffix=' kJ')} |")
@@ -893,7 +903,7 @@ def generate_session_report(
         has_hr = any(lap.avg_heart_rate is not None for lap in laps)
         has_dist = any(lap.distance is not None and lap.distance > 0 for lap in laps)
 
-        header_cols = ["Lap", "Time", "Avg W", "NP", "kJ"]
+        header_cols = ["Lap", "Time", "Paused", "Avg W", "NP", "kJ"]
         sep_cols = ["---"] * len(header_cols)
         if has_targets:
             header_cols.append("Target")
@@ -932,9 +942,13 @@ def generate_session_report(
             elif has_targets:
                 target_str = "—"
 
+            paused_sec = (lap.elapsed_time - lap.timer_time) if lap.elapsed_time is not None and lap.timer_time is not None else 0
+            paused_str = fmt_duration(paused_sec, show_seconds=True) if paused_sec > 0 else "0s"
+
             row = [
                 str(lap.lap_number + 1),
-                _fmt_duration(lap.elapsed_time),
+                _fmt_duration(lap.timer_time),
+                paused_str,
                 _v(lap.avg_power, fmt="{:.0f}", suffix=" W"),
                 _v(lap.normalized_power, fmt="{:.0f}", suffix=" W"),
                 _v(lap.total_work_kj, fmt="{:.0f}", suffix=" kJ"),
@@ -1145,11 +1159,14 @@ def generate_weekly_summary(
     np_vals = [r.normalized_power for r in results if r.normalized_power is not None]
     avg_IF = sum(if_vals) / len(if_vals) if if_vals else None
     avg_NP = sum(np_vals) / len(np_vals) if np_vals else None
+    weight = next((r.weight for r in results if r.weight is not None and r.weight > 0), None)
 
     lines: list[str] = [f"# Weekly Summary — {week_label}", ""]
     lines.append(f"*Period: {period}*")
     if ftp:
         lines.append(f"*FTP: {ftp} W*")
+    if weight:
+        lines.append(f"*Rider Weight: {weight:.1f} kg*")
     lines.append("")
 
     # Week at a Glance

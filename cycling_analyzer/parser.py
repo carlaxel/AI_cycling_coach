@@ -97,6 +97,7 @@ def parse_fit_file(path: str | Path) -> WorkoutData:
                         lap_number=lap_count,
                         start_time=_get(frame, "start_time"),
                         elapsed_time=_get(frame, "total_elapsed_time"),
+                        timer_time=_get(frame, "total_timer_time"),
                         distance=_get(frame, "total_distance"),
                         avg_power=_get(frame, "avg_power"),
                         max_power=_get(frame, "max_power"),

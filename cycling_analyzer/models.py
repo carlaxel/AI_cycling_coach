@@ -28,6 +28,7 @@ class LapSummary:
     lap_number: int = 0
     start_time: Optional[datetime] = None
     elapsed_time: Optional[float] = None
+    timer_time: Optional[float] = None
     distance: Optional[float] = None
     avg_power: Optional[float] = None
     max_power: Optional[int] = None

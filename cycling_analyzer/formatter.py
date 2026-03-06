@@ -20,7 +20,7 @@ def format_text(result: AnalysisResult) -> str:
     if s.sport:
         lines.append(f"  Sport        : {s.sport}")
     if s.start_time:
-        lines.append(f"  Date         : {s.start_time.strftime('%Y-%m-%d %H:%M')}")
+        lines.append(f"  Date         : {s.start_time.strftime('%Y-%m-%d')}")
     lines.append(f"  Duration     : {fmt_duration(s.timer_time or s.elapsed_time)}")
     lines.append(f"  Distance     : {fmt_dist(s.distance)}")
     if s.calories:
