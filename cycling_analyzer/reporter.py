@@ -340,6 +340,7 @@ class SessionClassification:
     is_muddle: bool
     is_hr_muddle: bool
     tss_status: str  # "OK", "Low", "High", "N/A"
+    is_lap_derived: bool = False
 
 
 def _lap_based_session_type(result: AnalysisResult) -> Optional[str]:
@@ -359,14 +360,15 @@ def _lap_based_session_type(result: AnalysisResult) -> Optional[str]:
         return None
     ftp = result.ftp
 
-    # (min_pct_ftp, max_pct_ftp, min_dur_s, max_dur_s, label)
-    # Tempo checked before Sweet Spot: shorter intervals (5–15 min) at 76–88% FTP.
-    # Sweet Spot requires ≥15 min sustained effort to distinguish from Tempo intervals.
+    # (min_pct, max_pct, min_dur_s, max_dur_s, label)
+    # SST: 88-94% per athlete profile. Expanded to 95% to catch edge cases.
+    # Threshold: 95-105%. 
+    # Tempo: 76-87%.
     interval_profiles = [
-        (1.10, float("inf"), 120,  360,  "VO2max / Hard"),
-        (0.90, 1.10,         600, 3600,  "Threshold"),
-        (0.76, 0.88,         300,  900,  "Tempo"),
-        (0.84, 0.90,         900, 5400,  "Sweet Spot"),
+        (1.06, float("inf"), 120,  360,  "VO2max / Hard"),
+        (0.95, 1.05,         600, 3600,  "Threshold"),
+        (0.88, 0.95,         900, 5400,  "Sweet Spot"),
+        (0.76, 0.87,         300, 1800,  "Tempo"),
     ]
 
     for min_pct, max_pct, min_dur, max_dur, label in interval_profiles:
@@ -388,9 +390,8 @@ def _classify_session(result: AnalysisResult) -> SessionClassification:
     IF = result.intensity_factor
 
     # Primary: derive session type from interval lap structure when possible.
-    # Overall NP/IF is suppressed by recovery laps between efforts, making IF
-    # alone unreliable for sessions built around short, hard intervals.
     session_type = _lap_based_session_type(result)
+    is_lap_derived = session_type is not None
 
     if session_type is None:
         # Fallback: IF-based classification for unstructured / steady-state rides.
@@ -398,63 +399,78 @@ def _classify_session(result: AnalysisResult) -> SessionClassification:
             session_type = "Unknown"
         elif IF < 0.60:
             session_type = "Recovery"
-        elif IF < 0.73:
+        elif IF <= 0.75:
             session_type = "Endurance"
-        elif IF < 0.80:
+        elif IF < 0.85:
             session_type = "Tempo"
-        elif IF < 0.90:
+        elif IF < 0.95:
             session_type = "Sweet Spot"
-        elif IF < 1.05:
+        elif IF < 1.06:
             session_type = "Threshold"
         else:
             session_type = "VO2max / Hard"
 
-    # Power muddle detection
+    # Power muddle detection: Flag Tempo-range IF that lacks structured intensity intent.
+    # Note: SST (0.85-0.94) is NOT muddle for this athlete; it's a primary goal.
     is_muddle = False
     if result.zones and IF is not None:
         z3 = next((z.percent_of_ride for z in result.zones if z.zone_name.startswith("Z3")), 0.0)
         z4 = next((z.percent_of_ride for z in result.zones if z.zone_name.startswith("Z4")), 0.0)
         is_muddle = (
-            session_type != "Tempo"
-            and z3 + z4 > 40 and z4 < 25 and z3 > 20 and 0.78 <= IF <= 0.92
+            not is_lap_derived
+            and session_type not in ("Tempo", "Sweet Spot", "Threshold", "VO2max / Hard")
+            and z3 > 25 and z4 < 20 and 0.76 <= IF < 0.85
         )
 
-    # HR muddle detection: Z2-dominant power but Z3+ HR (cross-domain mismatch)
+    # HR muddle detection: Z2-dominant power but HR exceeding 150 bpm ceiling.
     is_hr_muddle = False
     if session_type in ("Endurance", "Recovery") and result.zones:
         z2_pwr = next((z.percent_of_ride for z in result.zones if z.zone_name.startswith("Z2")), 0.0)
         if z2_pwr >= 50:
-            hrz = getattr(result.workout.session, "hr_zones", None)
-            if hrz is not None:
-                hr_total = (
-                    hrz.z1_time_seconds + hrz.z2_time_seconds + hrz.z3_time_seconds
-                    + hrz.z4_time_seconds + hrz.z5_time_seconds + hrz.z6_time_seconds
-                )
-                hr_z3_plus = hrz.z3_time_seconds + hrz.z4_time_seconds + hrz.z5_time_seconds + hrz.z6_time_seconds
-                if hr_total > 0 and hr_z3_plus / hr_total >= 0.30:
+            hr_values = [r.heart_rate for r in result.workout.records if r.heart_rate is not None]
+            if hr_values:
+                # Athlete Z2 ceiling is 150 bpm. Flag if >10% of ride is above this during Z2 power ride.
+                over_ceiling = sum(1 for hr in hr_values if hr > 150)
+                if over_ceiling / len(hr_values) >= 0.10:
                     is_hr_muddle = True
 
-    # TSS status
+    # TSS status: Use TSS per hour to account for ride duration.
     tss_status = "N/A"
     tss = result.tss
-    if tss is not None:
+    duration = result.workout.session.timer_time or result.workout.session.elapsed_time
+    if tss is not None and duration and duration > 0:
+        duration_hrs = duration / 3600
+        tss_per_hour = tss / duration_hrs
+        # Ranges based on real-world benchmarks (allowing for warm-ups/rest)
         ranges = {
-            "Recovery": (0, 40),
-            "Endurance": (40, 80),
-            "Tempo": (60, 100),
-            "Sweet Spot": (70, 100),
-            "Threshold": (80, 120),
-            "VO2max / Hard": (60, 100),
+            "Recovery": (10, 30),      # < 0.55 IF
+            "Endurance": (30, 55),     # 0.55 - 0.75 IF
+            "Tempo": (55, 75),         # 0.75 - 0.87 IF
+            "Sweet Spot": (72, 88),    # 0.85 - 0.94 IF
+            "Threshold": (85, 110),    # 0.92 - 1.05 IF
+            "VO2max / Hard": (105, 160), # > 1.02 IF
         }
         if session_type in ranges:
             lo, hi = ranges[session_type]
-            tss_status = "Low" if tss < lo else "High" if tss > hi else "OK"
+            
+            # Transit-aware adjustment: If a hard session (Threshold/VO2max) is long (>85m),
+            # the overall TSS/hr is diluted by transit/warmup. 
+            if session_type in ("Threshold", "VO2max / Hard") and duration_hrs > (85/60):
+                if is_lap_derived:
+                    # Work-Verified: We have lap-level proof of the intervals.
+                    lo *= 0.60
+                else:
+                    # IF-derived only: Relax moderately to account for transit.
+                    lo *= 0.75
+                
+            tss_status = "Low" if tss_per_hour < lo else "High" if tss_per_hour > hi else "OK"
 
     return SessionClassification(
         session_type=session_type,
         is_muddle=is_muddle,
         is_hr_muddle=is_hr_muddle,
         tss_status=tss_status,
+        is_lap_derived=is_lap_derived,
     )
 
 
@@ -472,10 +488,16 @@ def _session_commentary(result: AnalysisResult, cls: SessionClassification, indo
                 break
     zone_text = " and ".join(dominant) if dominant else "mixed zones"
 
+    duration = result.workout.session.timer_time or result.workout.session.elapsed_time
+    tph_str = ""
+    if result.tss and duration:
+        tph = result.tss / (duration / 3600)
+        tph_str = f" ({tph:.1f} TSS/hr)"
+
     if cls.tss_status == "OK":
-        tss_verdict = f"TSS of {tss_str} is within the healthy range."
+        tss_verdict = f"Intensity of {tss_str} TSS{tph_str} is within the target range for this session type."
     elif cls.tss_status in ("Low", "High"):
-        tss_verdict = f"TSS of {tss_str} is {cls.tss_status.lower()} for a {cls.session_type} session."
+        tss_verdict = f"Intensity of {tss_str} TSS{tph_str} is {cls.tss_status.lower()} for a {cls.session_type} session."
     else:
         tss_verdict = "TSS not calculated (no FTP set)."
 
@@ -487,22 +509,38 @@ def _session_commentary(result: AnalysisResult, cls: SessionClassification, indo
     warnings = []
     if cls.is_muddle:
         warnings.append(
-            "**Moderate muddle detected** — significant time in Z3 without reaching a clean "
-            "threshold stimulus. Either back off to true Z2 endurance or commit to focused "
-            "Z4 threshold work."
+            "**Moderate muddle detected** — significant time in Z3 (Tempo) without reaching a clean "
+            "threshold or Sweet Spot stimulus. Either back off to true Z2 endurance or commit to focused "
+            "intensity."
         )
     if cls.is_hr_muddle:
         warnings.append(
-            "**HR-power mismatch** — power was Z2 but HR drifted into Z3+. Possible causes: "
-            "residual fatigue, heat/humidity, insufficient warm-up, or early aerobic decoupling. "
-            "If recurring, back off intensity until HR stays in Z2 at target power."
+            "**HR-power mismatch** — power was Z2 but HR exceeded your 150 bpm ceiling for a significant "
+            "portion of the ride. Possible causes: residual fatigue, heat, or cardiac drift. "
+            "Monitor for overreaching."
         )
+
+    # Auto-lap detection for non-workouts
+    is_workout = any(lap.target_power_low is not None for lap in result.workout.laps)
+    if not is_workout:
+        ten_min_laps = [
+            lap for lap in result.workout.laps 
+            if 595 <= (lap.elapsed_time or 0) <= 605
+        ]
+        if len(ten_min_laps) >= 2:
+            avg_pwr = sum((l.avg_power or 0) for l in ten_min_laps) / len(ten_min_laps)
+            if result.ftp and avg_pwr > result.ftp * 0.85:
+                warnings.append(
+                    "**Auto-lap detected** — session contains multiple 10-minute laps at high power. "
+                    "This looks like a sustained effort (e.g. a climb) rather than structured intervals."
+                )
+
     if cls.tss_status == "High":
         warnings.append(
-            f"**TSS elevated** for a {cls.session_type} session — monitor cumulative fatigue."
+            f"**Intensity elevated** ({tph_str}) for a {cls.session_type} session — monitor cumulative fatigue."
         )
     elif cls.tss_status == "Low":
-        warnings.append(f"**TSS lower than expected** for a {cls.session_type} session.")
+        warnings.append(f"**Intensity lower than expected** ({tph_str}) for a {cls.session_type} session.")
 
     if indoor and result.workout.session.avg_heart_rate is None:
         warnings.append(
