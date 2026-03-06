@@ -106,48 +106,87 @@ Save all workout plan files to the `workout_plans/` directory in the project roo
 All structured sessions must include an **intervals.icu workout builder block** — plain text, copy-paste ready for direct import.
 
 Rules:
-- Use `%` of FTP for all power targets — **never use zone names (Z1, Z2, Z4, etc.)**
-- Use `Nx` repeat syntax for intervals
+- **Comments:** Always wrap descriptive summaries containing numbers/units (e.g., "261 W") in double quotes (`" "`) at the top of the file.
+- **Step Syntax:** Every executable workout step must start with a hyphen and a space `- `.
+- **Order:** The order must be `[Hyphen] [Step Note (Optional)] [Duration] [Intensity]`. (e.g. `- Work 20m 90%` NOT `- 20m 90% Work`)
+- **Loops:** Repetitions like `Nx` or `3x` must be on their own line with the repeated steps following underneath.
+- **Targets:** Use `%` of FTP for all power targets — **never use zone names (Z1, Z2, Z4, etc.)**
 - Do not include a cool-down step
 
 ### Template
 
-```
-Free spin
-- 5m 52%
+```text
+"Workout summary description with numbers like 261 W must be in quotes"
 
-Warm up
-- 10m 63%
+- Free spin 5m 52%
+- Warm up 10m 63%
 
-Main set Nx
-- Xm XX%
-- Xm XX%
+Nx
+- Step note 1 xm xx%
+- Step note 2 xm xx%
+"Xg carbs within 10 min post-ride"
 ```
 
 ### Example — 3×20 min SST
 
-```
-Free spin
-- 5m 52%
+```text
+"3x20 at 90% FTP with 5 min recovery"
 
-Warm up
-- 10m 63%
+- Free spin 5m 52%
+- Warm up 10m 63%
 
-Main set 3x
-- 20m 90%
-- 5m 52%
+3x
+- Work 20m 90%
+- Recovery 5m 52%
+"Xg carbs within 10 min post-ride"
 ```
 
 ### Example — 5×5 min VO2max
 
-```
-Free spin
-- 5m 52%
+```text
+"5x5 at 108% FTP"
 
-Warm up
-- 10m 63%
+- Free spin 5m 52%
+- Warm up 10m 63%
 
-Main set 5x
-- 5m 108%
-- 5m 52%
+5x
+- Work 5m 108%
+- Recovery 5m 52%
+"Xg carbs within 10 min post-ride"
 ```
+
+## Post-Ride Nutrition (Carb Replenishment)
+
+At the end of every generated session plan, include a calculation of the post-ride carbohydrates the athlete should consume within 10 minutes.
+
+Use the planned ride duration and estimated TSS/h to determine the multiplier (g/kg), then calculate the total grams based on the athlete's body weight (refer to the `cycling-athlete-profile` skill for current body weight). Estimate the total TSS based on the planned intensity/duration if not explicitly provided.
+
+| Ride duration | TSS/h | Post-ride drink (within 10 min) |
+|---------------|-------|---------------------------------|
+| ≤45 min       | <50   | 0.3–0.4 g/kg                    |
+| ≤45 min       | 50–60 | 0.4–0.5 g/kg                    |
+| ≤45 min       | 61–72 | 0.5–0.6 g/kg                    |
+| ≤45 min       | ≥73   | 0.5–0.7 g/kg                    |
+| 46–75 min     | <50   | 0.3–0.4 g/kg                    |
+| 46–75 min     | 50–60 | 0.4–0.5 g/kg                    |
+| 46–75 min     | 61–72 | 0.5–0.6 g/kg                    |
+| 46–75 min     | ≥73   | 0.6–0.7 g/kg                    |
+| 76–120 min    | <50   | 0.4–0.5 g/kg                    |
+| 76–120 min    | 50–60 | 0.5–0.6 g/kg                    |
+| 76–120 min    | 61–72 | 0.6–0.7 g/kg                    |
+| 76–120 min    | ≥73   | 0.7–0.8 g/kg                    |
+| 121–180 min   | <50   | 0.8–0.9 g/kg                    |
+| 121–180 min   | 50–60 | 0.9–1.0 g/kg                    |
+| 121–180 min   | 61–72 | 1.0–1.1 g/kg                    |
+| 121–180 min   | ≥73   | 1.1–1.2 g/kg                    |
+| 181–240 min   | <50   | 0.8–0.9 g/kg                    |
+| 181–240 min   | 50–60 | 1.0–1.1 g/kg                    |
+| 181–240 min   | 61–72 | 1.1–1.2 g/kg                    |
+| 181–240 min   | ≥73   | 1.2 g/kg                        |
+| >240 min      | <50   | 0.8–0.9 g/kg                    |
+| >240 min      | 50–60 | 1.0–1.1 g/kg                    |
+| >240 min      | 61–72 | 1.1–1.2 g/kg                    |
+| >240 min      | ≥73   | 1.2 g/kg                        |
+
+**Format Example:**
+`Post-ride carbs (within 10 min): 0.5–0.6 g/kg = 38–46g`

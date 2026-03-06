@@ -240,13 +240,13 @@ def analyze(workout: WorkoutData, ftp: Optional[int] = None, weight: Optional[fl
                     hr_zones.z5_time_seconds += 1
             workout.session.hr_zones = hr_zones
 
-    # True Aerobic Decoupling with strict guards
-    # Guards: session > 40m, VI <= 1.05, IF between 0.55 and 0.85
+    # True Aerobic Decoupling with relaxed guards
+    # Guards: session > 40m, VI <= 1.10, IF between 0.55 and 0.95 (includes SST)
     duration = workout.session.timer_time or workout.session.elapsed_time
     if duration and duration >= 40 * 60:
         vi = result.variability_index
         if_val = result.intensity_factor
-        if vi and vi <= 1.05 and if_val and 0.55 <= if_val <= 0.85:
+        if vi and vi <= 1.10 and if_val and 0.55 <= if_val <= 0.95:
             valid_recs = [r for r in workout.records if r.power is not None and r.heart_rate is not None]
             if len(valid_recs) >= 1200:  # at least ~20 mins of valid data to be safe
                 half_idx = len(valid_recs) // 2

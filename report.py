@@ -10,6 +10,7 @@ from pathlib import Path
 
 from cycling_analyzer import analyze, parse_fit_file
 from cycling_analyzer.fitness_model import FitnessHistory
+from cycling_analyzer.power_records import PowerRecords, extract_peak_powers
 from cycling_analyzer.reporter import (
     session_filename,
     week_label,
@@ -77,6 +78,7 @@ def cmd_week(args: argparse.Namespace) -> None:
         weeks[label].append((fit_path, result))
 
     history = FitnessHistory(Path("data/fitness_history.json"))
+    power_records = PowerRecords(Path("data/power_records.json"))
 
     summaries: list[str] = []
     for current_week, week_results in sorted(weeks.items()):
@@ -88,11 +90,14 @@ def cmd_week(args: argparse.Namespace) -> None:
         processed_dir = fit_dir / "processed" / current_week
         processed_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write session reports
+        # Write session reports (with PR detection)
         for fit_path, result in week_results:
             dt = result.workout.session.start_time or datetime.now()
+            peaks = extract_peak_powers(result.workout.records)
+            pr_checks = power_records.check_prs(dt.isoformat(), peaks)
+            power_records.upsert(dt.isoformat(), peaks)
             filename = session_filename(dt)
-            content = generate_session_report(result, fit_path.name)
+            content = generate_session_report(result, fit_path.name, pr_checks=pr_checks)
             (week_reports_dir / filename).write_text(content, encoding="utf-8")
 
         # Include already-archived .fit files for the same week in the summary
@@ -103,7 +108,13 @@ def cmd_week(args: argparse.Namespace) -> None:
                 continue
             try:
                 workout = parse_fit_file(archived_fit)
-                extra_results.append(analyze(workout, ftp=args.ftp, weight=args.weight))
+                extra_result = analyze(workout, ftp=args.ftp, weight=args.weight)
+                extra_results.append(extra_result)
+                # Upsert archived session peaks (idempotent)
+                arc_dt = extra_result.workout.session.start_time
+                if arc_dt:
+                    arc_peaks = extract_peak_powers(extra_result.workout.records)
+                    power_records.upsert(arc_dt.isoformat(), arc_peaks)
             except Exception as e:
                 print(f"Warning: failed to parse archived {archived_fit.name}: {e}", file=sys.stderr)
 
@@ -128,6 +139,7 @@ def cmd_week(args: argparse.Namespace) -> None:
             all_results, current_week,
             session_filenames=session_filenames,
             fitness_metrics=fitness_metrics,
+            power_records=power_records,
         )
         (week_reports_dir / "weekly_summary.md").write_text(summary, encoding="utf-8")
 
@@ -151,6 +163,7 @@ def cmd_week(args: argparse.Namespace) -> None:
         )
 
     history.save()
+    power_records.save()
 
     print(f"Generated reports for {len(weeks)} week(s):")
     for s in summaries:
@@ -191,14 +204,19 @@ def cmd_block(args: argparse.Namespace) -> None:
     sorted_labels = sorted(weeks.keys())
     sorted_weeks = [weeks[label] for label in sorted_labels]
 
-    # Build/update fitness history from all sessions (bootstrap for weekly reports)
+    # Build/update fitness history and power records from all sessions
     history = FitnessHistory(Path("data/fitness_history.json"))
+    power_records = PowerRecords(Path("data/power_records.json"))
     for week_results in sorted_weeks:
         for result in week_results:
             dt = result.workout.session.start_time
             if dt and result.tss is not None:
                 history.upsert(dt.isoformat(), result.tss)
+            if dt:
+                peaks = extract_peak_powers(result.workout.records)
+                power_records.upsert(dt.isoformat(), peaks)
     history.save()
+    power_records.save()
 
     # Compute per-week fitness snapshots (as of each week's last session date)
     weekly_snapshots = []
@@ -211,7 +229,11 @@ def cmd_block(args: argparse.Namespace) -> None:
     # Only pass if all weeks have snapshots
     snapshots_arg = weekly_snapshots if all(s is not None for s in weekly_snapshots) else None
 
-    report = generate_block_analysis(sorted_weeks, sorted_labels, weekly_snapshots=snapshots_arg)
+    report = generate_block_analysis(
+        sorted_weeks, sorted_labels,
+        weekly_snapshots=snapshots_arg,
+        power_records=power_records,
+    )
 
     reports_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")

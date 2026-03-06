@@ -14,42 +14,6 @@ After reviewing the full codebase, generated reports, and data available from FI
 
 
 
-## Rank 4: `power-duration-profiling`
-
-**What:** Rules for interpreting power-duration curves — PR tracking, phenotype classification, progress comparison, FTP validation from the curve.
-
-**Why this athlete:** Current reports show peak powers at 6 fixed durations per session but never compare across sessions. The Jan 15 session had a 20-min peak of 294W — nearly equal to the stated 295W FTP. Tracking whether that number creeps up week over week is the most direct indicator that training is working. The flat 5min-to-20min curve (only 5W drop) reveals a strong steady-state profile aligned with TT goals, but this is never surfaced.
-
-**Unlocks:**
-- All-time and rolling best-power records per duration
-- PR flags in session reports ("new 20-min best: 298W, previous: 294W")
-- Power profile classification (sprinter vs TT vs climber phenotype from ratios)
-- FTP staleness detection (when 20-min best regularly exceeds FTP × 1.05)
-- Progress tracking: compare current peaks to a reference period
-
-**Code changes:** Moderate — persistent records store (JSON), extend existing `_peak_powers` function to check against stored records. New report sections.
-
-**Dependencies:** None. Power data always available. Value compounds over time.
-
----
-
-## Rank 3: `heart-rate-aerobic-efficiency`
-
-**What:** Rules for HR zone analysis, aerobic decoupling (power:HR drift in steady-state efforts), Efficiency Factor (NP/avg HR), and cardiac drift detection.
-
-**Why this athlete:** Aerobic decoupling directly predicts whether the athlete can hold power for 60+ minutes — the core goal. The manually-written January monthly report already demonstrates the value ("150 bpm at IF 0.683 is 10-15 bpm above baseline"), but the code doesn't compute any of this. EF trending would show aerobic fitness improvements over weeks.
-
-**Unlocks:**
-- HR zone distribution (5-zone model from estimated LTHR ~170 bpm)
-- Aerobic decoupling: split steady-state efforts in half, compare NP:HR (>5% drift = aerobic ceiling reached)
-- Efficiency Factor (NP/avgHR) trending across weeks
-- Illness/fatigue detection from elevated HR at known power outputs
-
-**Code changes:** Moderate — new analysis functions for EF, decoupling (requires identifying sustained steady-state segments). Conditional report sections.
-
-**Dependencies:** **Requires HR data.** Highly reliable historically (present in 241 of 251 sessions in 2025). The intermittent missing data (e.g. W08-W09) is an anomaly, not the norm. Given the solid baseline data (known LTHR, max HR, and normal Z2 HR ranges), this is now high-value and ready for implementation. Moved up in priority.
-
----
 
 ## Rank 5: `session-matching`
 

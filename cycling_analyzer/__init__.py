@@ -8,6 +8,7 @@ from .reporter import (
     week_label,
     session_filename,
 )
+from .power_records import PowerRecords, extract_peak_powers
 
 __all__ = [
     "parse_fit_file",
@@ -19,4 +20,6 @@ __all__ = [
     "generate_block_analysis",
     "week_label",
     "session_filename",
+    "PowerRecords",
+    "extract_peak_powers",
 ]

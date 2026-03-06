@@ -13,8 +13,10 @@ This skill provides the rules and guidelines for analyzing a cyclist's aerobic e
 
 ## Aerobic Decoupling (Pw:HR)
 Aerobic decoupling measures the relationship between power output and heart rate over the duration of a steady-state effort by comparing the power-to-HR ratio of the first half of the effort to the second half.
-- **Valid Use Cases:** Decoupling is most relevant during steady-state aerobic efforts (AeT/Zone 2) or sustained intervals (Tempo/Sweet Spot/Threshold).
+- **Valid Use Cases:** Decoupling is most relevant during steady-state aerobic efforts (AeT/Zone 2) or sustained intervals (Tempo/Sweet Spot/Threshold), **provided the cardiovascular system was adequately primed before the effort began**.
   - **Shorter/Intense Intervals:** For short, explosive intervals, HR lag causes naturally high decoupling (e.g., >10-15%). Do not use decoupling to judge fitness here; instead, look at the later intervals to see if the athlete can sustain repeated efforts.
+  - **Light or short warm-up (< 15–20 min without openers):** A minimal warm-up suppresses heart rate in the first half of the main effort because the cardiovascular system hasn't fully caught up. This creates a "decoupling illusion" — the session decoupling figure will be inflated by several percent even if fitness is fine. **Do not interpret session-level decoupling for rides where the warm-up was light.** Instead, compare the average HR of the final interval against prior sessions at the same power, or look at whether HR stabilizes (flat tabletop) within the second interval — a fit athlete's HR plateaus; a fatigued one's keeps creeping.
+  - **Warmup-only or progressive sessions:** If the session is a ramp or primarily a warm-up, the metric is undefined — power is rising throughout, so the first-half/second-half split is meaningless. Discard decoupling entirely for such sessions.
 - **The 5% Rule**: 
   - **Decoupling < 5%**: Indicates good, stable aerobic fitness for that duration and intensity. The athlete's heart rate remains relatively stable for the given power output.
   - **Decoupling > 5%**: Indicates upward drift in heart rate. Fatigue is setting in, suggesting lacking endurance fitness for the specific duration or intensity. For threshold work, decoupling > 8% indicates a need for more sub-threshold/tempo work or a review of fueling.

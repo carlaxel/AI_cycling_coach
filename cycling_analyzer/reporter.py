@@ -8,7 +8,7 @@ from typing import Optional
 
 from .analyzer import AnalysisResult, IntervalAnalysis, ZoneDistribution, COGGAN_ZONES
 from .fitness_model import CTL_TC, FitnessMetrics, FitnessSnapshot
-from .models import RecordPoint
+from .models import HRZoneDistribution, RecordPoint
 from .utils import fmt_duration, fmt_dist, fmt_speed, bar
 
 
@@ -115,29 +115,12 @@ def _peak_powers(
     records: list[RecordPoint], ftp: int | None
 ) -> list[tuple[str, int, float | None]]:
     """Sliding-window best average power for standard durations."""
-    powers = [r.power for r in records if r.power is not None]
-    if not powers:
-        return []
-
+    from .power_records import extract_peak_powers, DURATION_LABELS
+    raw = extract_peak_powers(records)
     result = []
-    n_total = len(powers)
-    for n, label in [
-        (5, "5 sec"), (10, "10 sec"), (30, "30 sec"),
-        (60, "1 min"), (300, "5 min"), (1200, "20 min"),
-    ]:
-        if n_total < n:
-            continue
-        win_sum = float(sum(powers[:n]))
-        best = win_sum / n
-        for i in range(1, n_total - n + 1):
-            win_sum += powers[i + n - 1] - powers[i - 1]
-            avg = win_sum / n
-            if avg > best:
-                best = avg
-        best_w = round(best)
-        pct = round(best_w / ftp * 100, 1) if ftp is not None and ftp > 0 else None
-        result.append((label, best_w, pct))
-
+    for dur, watts in raw:
+        pct = round(watts / ftp * 100, 1) if ftp is not None and ftp > 0 else None
+        result.append((DURATION_LABELS[dur], watts, pct))
     return result
 
 
@@ -278,6 +261,76 @@ def _interval_execution_section(ia: IntervalAnalysis, ftp: int) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# HR helpers
+# ---------------------------------------------------------------------------
+
+def _interpret_decoupling(decoupling_pct: float, if_val: float) -> str:
+    """Return a short interpretation string for aerobic decoupling."""
+    if decoupling_pct < -2:
+        return "negative (drafting / pacing down / cooling)"
+    if if_val >= 0.85:
+        # SST / Threshold range
+        if decoupling_pct < 5:
+            return "stable"
+        if decoupling_pct < 8:
+            return "moderate drift"
+        return "significant drift"
+    else:
+        # Z2 / Tempo range
+        if decoupling_pct < 3:
+            return "excellent"
+        if decoupling_pct < 5:
+            return "stable"
+        if decoupling_pct < 8:
+            return "moderate drift"
+        return "significant drift"
+
+
+def _merge_hr_zones(results: list) -> "HRZoneDistribution | None":
+    """Sum HR zone seconds across all sessions that have hr_zones data."""
+    merged = HRZoneDistribution()
+    found_any = False
+    for r in results:
+        hrz = getattr(r.workout.session, "hr_zones", None)
+        if hrz is None:
+            continue
+        found_any = True
+        merged.z1_time_seconds += hrz.z1_time_seconds
+        merged.z2_time_seconds += hrz.z2_time_seconds
+        merged.z3_time_seconds += hrz.z3_time_seconds
+        merged.z4_time_seconds += hrz.z4_time_seconds
+        merged.z5_time_seconds += hrz.z5_time_seconds
+        merged.z6_time_seconds += hrz.z6_time_seconds
+    return merged if found_any else None
+
+
+def _render_hr_zones_table(hrz: "HRZoneDistribution", heading_level: int = 3) -> list[str]:
+    """Render HR zone distribution as a markdown table. Returns list of lines."""
+    z_times = [
+        ("Z1", hrz.z1_time_seconds),
+        ("Z2", hrz.z2_time_seconds),
+        ("Z3", hrz.z3_time_seconds),
+        ("Z4", hrz.z4_time_seconds),
+        ("Z5", hrz.z5_time_seconds),
+    ]
+    if hrz.z6_time_seconds > 0:
+        z_times.append(("Z6", hrz.z6_time_seconds))
+
+    total = sum(t for _, t in z_times)
+    if total == 0:
+        return []
+
+    heading = "#" * heading_level
+    lines = [f"{heading} Heart Rate Zones", ""]
+    lines += ["| Zone | Time | % |", "|---|---|---|"]
+    for z_name, z_time in z_times:
+        pct = z_time / total * 100
+        lines.append(f"| {z_name} | {_fmt_duration(z_time)} | {pct:.1f}% |")
+    lines.append("")
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Session classification
 # ---------------------------------------------------------------------------
 
@@ -285,6 +338,7 @@ def _interval_execution_section(ia: IntervalAnalysis, ftp: int) -> list[str]:
 class SessionClassification:
     session_type: str
     is_muddle: bool
+    is_hr_muddle: bool
     tss_status: str  # "OK", "Low", "High", "N/A"
 
 
@@ -355,7 +409,7 @@ def _classify_session(result: AnalysisResult) -> SessionClassification:
         else:
             session_type = "VO2max / Hard"
 
-    # Muddle detection
+    # Power muddle detection
     is_muddle = False
     if result.zones and IF is not None:
         z3 = next((z.percent_of_ride for z in result.zones if z.zone_name.startswith("Z3")), 0.0)
@@ -364,6 +418,21 @@ def _classify_session(result: AnalysisResult) -> SessionClassification:
             session_type != "Tempo"
             and z3 + z4 > 40 and z4 < 25 and z3 > 20 and 0.78 <= IF <= 0.92
         )
+
+    # HR muddle detection: Z2-dominant power but Z3+ HR (cross-domain mismatch)
+    is_hr_muddle = False
+    if session_type in ("Endurance", "Recovery") and result.zones:
+        z2_pwr = next((z.percent_of_ride for z in result.zones if z.zone_name.startswith("Z2")), 0.0)
+        if z2_pwr >= 50:
+            hrz = getattr(result.workout.session, "hr_zones", None)
+            if hrz is not None:
+                hr_total = (
+                    hrz.z1_time_seconds + hrz.z2_time_seconds + hrz.z3_time_seconds
+                    + hrz.z4_time_seconds + hrz.z5_time_seconds + hrz.z6_time_seconds
+                )
+                hr_z3_plus = hrz.z3_time_seconds + hrz.z4_time_seconds + hrz.z5_time_seconds + hrz.z6_time_seconds
+                if hr_total > 0 and hr_z3_plus / hr_total >= 0.30:
+                    is_hr_muddle = True
 
     # TSS status
     tss_status = "N/A"
@@ -384,6 +453,7 @@ def _classify_session(result: AnalysisResult) -> SessionClassification:
     return SessionClassification(
         session_type=session_type,
         is_muddle=is_muddle,
+        is_hr_muddle=is_hr_muddle,
         tss_status=tss_status,
     )
 
@@ -420,6 +490,12 @@ def _session_commentary(result: AnalysisResult, cls: SessionClassification, indo
             "**Moderate muddle detected** — significant time in Z3 without reaching a clean "
             "threshold stimulus. Either back off to true Z2 endurance or commit to focused "
             "Z4 threshold work."
+        )
+    if cls.is_hr_muddle:
+        warnings.append(
+            "**HR-power mismatch** — power was Z2 but HR drifted into Z3+. Possible causes: "
+            "residual fatigue, heat/humidity, insufficient warm-up, or early aerobic decoupling. "
+            "If recurring, back off intensity until HR stays in Z2 at target power."
         )
     if cls.tss_status == "High":
         warnings.append(
@@ -499,6 +575,15 @@ def _critique_and_insights(
         points.append(
             f"**{muddle_count} session{'s' if muddle_count > 1 else ''} drifted into muddle territory** — "
             "consider backing off to clean Z2 or committing to structured threshold work."
+        )
+
+    # 1b. HR muddle
+    hr_muddle_count = sum(1 for c in classifications if c.is_hr_muddle)
+    if hr_muddle_count:
+        points.append(
+            f"**{hr_muddle_count} session{'s' if hr_muddle_count > 1 else ''} with HR-power mismatch** — "
+            "power stayed in Z2 but HR drifted into Z3+. Check for residual fatigue, heat, or "
+            "early aerobic decoupling."
         )
 
     # 2. Pedaling dynamics asymmetry
@@ -585,7 +670,11 @@ def _critique_and_insights(
 # Session report
 # ---------------------------------------------------------------------------
 
-def generate_session_report(result: AnalysisResult, source_filename: str) -> str:
+def generate_session_report(
+    result: AnalysisResult,
+    source_filename: str,
+    pr_checks: list | None = None,
+) -> str:
     s = result.workout.session
     records = result.workout.records
     laps = result.workout.laps
@@ -644,31 +733,15 @@ def generate_session_report(result: AnalysisResult, source_filename: str) -> str
         if has_ef or has_decoupling:
             lines += ["| Metric | Value |", "|---|---|"]
             if has_ef:
-                lines.append(f"| Efficiency Factor (EF) | {s.efficiency_factor:.2f} |")
+                lines.append(f"| Efficiency Factor (EF) | {s.efficiency_factor:.2f} NP/bpm |")
             if has_decoupling:
-                lines.append(f"| Aerobic Decoupling | {s.aerobic_decoupling_pct:+.1f}% |")
+                if_val = result.intensity_factor or 0.0
+                interp = _interpret_decoupling(s.aerobic_decoupling_pct, if_val)
+                lines.append(f"| Aerobic Decoupling | {s.aerobic_decoupling_pct:+.1f}% ({interp}) |")
             lines.append("")
         
         if has_hr_zones:
-            hrz = s.hr_zones
-            z_times = [
-                ("Z1", hrz.z1_time_seconds),
-                ("Z2", hrz.z2_time_seconds),
-                ("Z3", hrz.z3_time_seconds),
-                ("Z4", hrz.z4_time_seconds),
-                ("Z5", hrz.z5_time_seconds),
-            ]
-            if hasattr(hrz, "z6_time_seconds") and hrz.z6_time_seconds > 0:
-                z_times.append(("Z6", hrz.z6_time_seconds))
-            
-            total_hr_time = sum(t for _, t in z_times)
-            if total_hr_time > 0:
-                lines += ["### Heart Rate Zones", ""]
-                lines += ["| Zone | Time | % |", "|---|---|---|"]
-                for z_name, z_time in z_times:
-                    pct = z_time / total_hr_time * 100
-                    lines.append(f"| {z_name} | {_fmt_duration(z_time)} | {pct:.1f}% |")
-                lines.append("")
+            lines += _render_hr_zones_table(s.hr_zones, heading_level=3)
 
     # Heart Rate (conditional)
     if s.avg_heart_rate or s.max_heart_rate:
@@ -722,16 +795,58 @@ def generate_session_report(result: AnalysisResult, source_filename: str) -> str
     peaks = _peak_powers(records, result.ftp)
     if peaks:
         lines += ["## Peak Power Durations", ""]
+        # Build a lookup of PRCheck by label for quick access
+        pr_lookup: dict[str, object] = {}
+        if pr_checks:
+            for chk in pr_checks:
+                if chk.is_pr:
+                    pr_lookup[chk.label] = chk
+        show_pr = bool(pr_lookup)
         if result.weight and result.weight > 0:
-            lines += ["| Duration | Best Power | % FTP | W/kg |", "|---|---|---|---|"]
+            if show_pr:
+                lines += ["| Duration | Best Power | % FTP | W/kg | PR |", "|---|---|---|---|---|"]
+            else:
+                lines += ["| Duration | Best Power | % FTP | W/kg |", "|---|---|---|---|"]
             for label, watts, pct_ftp in peaks:
                 pct_str = f"{pct_ftp:.1f}%" if pct_ftp is not None else "—"
-                lines.append(f"| {label} | {watts} W | {pct_str} | {watts / result.weight:.2f} |")
+                row = f"| {label} | {watts} W | {pct_str} | {watts / result.weight:.2f} |"
+                if show_pr:
+                    chk = pr_lookup.get(label)
+                    if chk:
+                        imp = f" (+{chk.improvement_watts} W)" if chk.improvement_watts else ""
+                        row += f" NEW{imp} |"
+                    else:
+                        row += " |"
+                lines.append(row)
         else:
-            lines += ["| Duration | Best Power | % FTP |", "|---|---|---|"]
+            if show_pr:
+                lines += ["| Duration | Best Power | % FTP | PR |", "|---|---|---|---|"]
+            else:
+                lines += ["| Duration | Best Power | % FTP |", "|---|---|---|"]
             for label, watts, pct_ftp in peaks:
                 pct_str = f"{pct_ftp:.1f}%" if pct_ftp is not None else "—"
-                lines.append(f"| {label} | {watts} W | {pct_str} |")
+                row = f"| {label} | {watts} W | {pct_str} |"
+                if show_pr:
+                    chk = pr_lookup.get(label)
+                    if chk:
+                        imp = f" (+{chk.improvement_watts} W)" if chk.improvement_watts else ""
+                        row += f" NEW{imp} |"
+                    else:
+                        row += " |"
+                lines.append(row)
+        # Bold callouts for each PR
+        if show_pr:
+            lines.append("")
+            for label, watts, _ in peaks:
+                chk = pr_lookup.get(label)
+                if chk:
+                    if chk.previous_best is not None and chk.improvement_watts is not None:
+                        lines.append(
+                            f"**New {label} best: {watts} W** "
+                            f"(previous: {chk.previous_best} W, +{chk.improvement_watts} W)"
+                        )
+                    else:
+                        lines.append(f"**First {label} best recorded: {watts} W**")
         lines.append("")
 
     # Laps / Intervals
@@ -961,6 +1076,7 @@ def generate_weekly_summary(
     week_label: str,
     session_filenames: list[str] | None = None,
     fitness_metrics: FitnessMetrics | None = None,
+    power_records: object | None = None,
 ) -> str:
     if not results:
         return f"# Weekly Summary — {week_label}\n\nNo sessions found.\n"
@@ -1012,11 +1128,56 @@ def generate_weekly_summary(
     weight = next((r.weight for r in results if r.weight is not None and r.weight > 0), None)
     if weight and avg_NP is not None:
         lines.append(f"| Avg NP W/kg | {avg_NP / weight:.2f} W/kg |")
+    ef_vals = [r.workout.session.efficiency_factor for r in results if r.workout.session.efficiency_factor is not None]
+    avg_EF = sum(ef_vals) / len(ef_vals) if ef_vals else None
+    if avg_EF is not None:
+        lines.append(f"| Avg EF | {avg_EF:.2f} NP/bpm |")
+    decoup_vals = [r.workout.session.aerobic_decoupling_pct for r in results if r.workout.session.aerobic_decoupling_pct is not None]
+    avg_decoup = sum(decoup_vals) / len(decoup_vals) if decoup_vals else None
+    if avg_decoup is not None:
+        lines.append(f"| Avg Decoupling | {avg_decoup:+.1f}% ({len(decoup_vals)} sessions) |")
     lines.append("")
 
     # Fitness & Fatigue (PMC)
     if fitness_metrics is not None:
         lines += _fitness_section(fitness_metrics)
+
+    # Weekly Peak Powers
+    if power_records is not None:
+        from .power_records import extract_peak_powers, DURATION_LABELS
+        all_week_records = [rec for r in results for rec in r.workout.records]
+        week_peaks = extract_peak_powers(all_week_records)
+        if week_peaks:
+            lines += ["## Weekly Peak Powers", ""]
+            lines += ["| Duration | This Week | All-Time | vs AT |", "|---|---|---|---|"]
+            for dur, watts in week_peaks:
+                label = DURATION_LABELS[dur]
+                at = power_records.all_time_best(dur)
+                at_str = f"{at.watts} W" if at else "—"
+                if at:
+                    diff = watts - at.watts
+                    if diff == 0:
+                        vs_str = "= AT"
+                    elif diff > 0:
+                        vs_str = f"+{diff} W (NEW AT)"
+                    else:
+                        pct_off = abs(diff) / at.watts * 100
+                        vs_str = f"{diff} W ({pct_off:.0f}% off)"
+                else:
+                    vs_str = "first data"
+                lines.append(f"| {label} | {watts} W | {at_str} | {vs_str} |")
+            lines.append("")
+            # FTP staleness warning
+            if ftp:
+                staleness = power_records.check_ftp_staleness(ftp)
+                if staleness.is_stale:
+                    lines.append(
+                        f"> **FTP may be underestimated.** "
+                        f"20-min best {staleness.best_20min} W in ≥2 sessions exceeds "
+                        f"FTP ({ftp} W) × 1.05. "
+                        f"Suggested FTP update: {staleness.suggested_ftp} W."
+                    )
+                    lines.append("")
 
     # Sort results and filenames together chronologically
     filenames = session_filenames or [""] * len(results)
@@ -1039,6 +1200,8 @@ def generate_weekly_summary(
         flags = []
         if cls.is_muddle:
             flags.append("muddle")
+        if cls.is_hr_muddle:
+            flags.append("HR mismatch")
         if cls.tss_status not in ("OK", "N/A"):
             flags.append(f"TSS {cls.tss_status.lower()}")
         flags_str = ", ".join(flags) if flags else "—"
@@ -1077,6 +1240,12 @@ def generate_weekly_summary(
         lines.append(f"| Z5+ (High intensity) | 5–10% | {high:.1f}% | {_band_status(high, 5, 10)} |")
         lines.append("")
 
+    # Combined HR Zone Distribution
+    merged_hrz = _merge_hr_zones([r for r, _ in paired])
+    if merged_hrz is not None:
+        lines += ["## Combined HR Zone Distribution", ""]
+        lines += _render_hr_zones_table(merged_hrz, heading_level=3)
+
     # Critique & Insights
     lines += ["## Critique & Insights", ""]
     lines.append(_critique_and_insights([r for r, _ in paired], classifications))
@@ -1093,6 +1262,7 @@ def generate_block_analysis(
     weeks: list[list[AnalysisResult]],
     week_labels: list[str],
     weekly_snapshots: list[FitnessSnapshot] | None = None,
+    power_records: object | None = None,
 ) -> str:
     if not weeks:
         return "# Block Analysis\n\nNo data found.\n"
@@ -1127,6 +1297,10 @@ def generate_block_analysis(
         avg_NP = sum(np_vals) / len(np_vals) if np_vals else None
         vi_vals = [r.variability_index for r in week if r.variability_index is not None]
         avg_VI = sum(vi_vals) / len(vi_vals) if vi_vals else None
+        ef_vals = [r.workout.session.efficiency_factor for r in week if r.workout.session.efficiency_factor is not None]
+        avg_EF = sum(ef_vals) / len(ef_vals) if ef_vals else None
+        decoup_vals = [r.workout.session.aerobic_decoupling_pct for r in week if r.workout.session.aerobic_decoupling_pct is not None]
+        avg_decoup = sum(decoup_vals) / len(decoup_vals) if decoup_vals else None
 
         type_counts: dict[str, int] = {}
         for r in week:
@@ -1145,6 +1319,8 @@ def generate_block_analysis(
             "avg_IF": avg_IF,
             "avg_NP": avg_NP,
             "avg_VI": avg_VI,
+            "avg_EF": avg_EF,
+            "avg_decoup": avg_decoup,
             "dominant_type": dominant,
             "low_pct": low,
             "mid_pct": mid,
@@ -1175,6 +1351,55 @@ def generate_block_analysis(
         vi_str = f"{ws['avg_VI']:.3f}" if ws["avg_VI"] is not None else "—"
         lines.append(f"| {ws['label']} | {np_str} | {if_str} | {vi_str} |")
     lines.append("")
+
+    # HR Metric Trends (only when at least one week has EF data)
+    if any(ws["avg_EF"] is not None for ws in week_stats):
+        lines += ["## HR Metric Trends", ""]
+        lines += ["| Week | Avg EF | Avg Decoupling |", "|---|---|---|"]
+        for ws in week_stats:
+            ef_str = f"{ws['avg_EF']:.2f} NP/bpm" if ws["avg_EF"] is not None else "—"
+            decoup_str = f"{ws['avg_decoup']:+.1f}%" if ws["avg_decoup"] is not None else "—"
+            lines.append(f"| {ws['label']} | {ef_str} | {decoup_str} |")
+        lines.append("")
+
+    # Power Duration Trends
+    if power_records is not None:
+        from .power_records import extract_peak_powers, DURATION_LABELS
+        # Summary durations to show in the table
+        summary_durations = [5, 60, 300, 1200]
+        summary_labels = [DURATION_LABELS[d] for d in summary_durations]
+
+        # Compute per-week bests for the summary durations
+        week_power_rows: list[dict] = []
+        for label, week in zip(week_labels, weeks):
+            all_records = [rec for r in week for rec in r.workout.records]
+            peaks_map = dict(extract_peak_powers(all_records))
+            week_power_rows.append({
+                "label": label,
+                "peaks": peaks_map,
+            })
+
+        lines += ["## Power Duration Trends", ""]
+        header = "| Week | " + " | ".join(summary_labels) + " |"
+        sep = "|---|" + "---|" * len(summary_durations)
+        lines += [header, sep]
+        for row in week_power_rows:
+            cells = []
+            for d in summary_durations:
+                w = row["peaks"].get(d)
+                cells.append(f"{w} W" if w is not None else "—")
+            lines.append(f"| {row['label']} | " + " | ".join(cells) + " |")
+        lines.append("")
+
+        # Phenotype classification
+        profile = power_records.classify_profile()
+        if profile and profile.phenotype != "Unknown":
+            lines.append(f"**Power Profile:** {profile.phenotype} (confidence: {profile.confidence})")
+            if profile.five_min_to_20min is not None:
+                lines.append(f"5min:20min ratio = {profile.five_min_to_20min:.2f}x")
+            if profile.five_sec_to_5min is not None:
+                lines.append(f"5s:5min ratio = {profile.five_sec_to_5min:.2f}x")
+            lines.append("")
 
     # Zone Distribution Trends
     lines += ["## Zone Distribution Trends", ""]
@@ -1230,13 +1455,19 @@ def generate_block_analysis(
 
     # Warnings
     warnings = []
-    muddle_count = sum(
-        1 for week in weeks for r in week if _classify_session(r).is_muddle
-    )
+    all_cls = [_classify_session(r) for week in weeks for r in week]
+    muddle_count = sum(1 for c in all_cls if c.is_muddle)
     if muddle_count:
         warnings.append(
             f"**{muddle_count} muddle session{'s' if muddle_count > 1 else ''}** across the block — "
             "time spent in the grey zone without clear training stimulus."
+        )
+    hr_muddle_count = sum(1 for c in all_cls if c.is_hr_muddle)
+    if hr_muddle_count:
+        warnings.append(
+            f"**{hr_muddle_count} HR-power mismatch session{'s' if hr_muddle_count > 1 else ''}** — "
+            "power in Z2 but HR in Z3+. May indicate residual fatigue, heat stress, or "
+            "degrading aerobic efficiency across the block."
         )
 
     all_low = [ws["low_pct"] for ws in week_stats]
