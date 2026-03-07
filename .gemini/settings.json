@@ -2,7 +2,24 @@
   "ide": {
     "enabled": true
   },
- "experimental": {
+  "general": {
+    "defaultApprovalMode": "auto_edit"
+  },
+  "tools": {
+    "allowed": [
+      "cycling-coach",
+      "activate_skill",
+      "run_shell_command(uv)",
+      "run_shell_command(python)",
+      "run_shell_command(./inbox.sh)",
+      "run_shell_command(cat)",
+      "run_shell_command(tail)",
+      "run_shell_command(grep)",
+      "run_shell_command(find)",
+      "run_shell_command(ls)"
+    ]
+  },
+  "experimental": {
     "plan": true,
     "enableAgents": true
   },

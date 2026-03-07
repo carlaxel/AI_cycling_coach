@@ -1,3 +1,8 @@
+---
+name: power-duration-profiling
+description: Check for FTP staleness, evaluate power-duration phenotype (Sprinter vs. Diesel), and interpret power duration progress across all-time, 1-year, and 30-day windows.
+---
+
 # Power Duration Profiling — Interpretation Rules
 
 ## Standard Durations and Energy Systems
@@ -34,12 +39,32 @@ Confidence levels:
 ## FTP Staleness Detection
 
 FTP is flagged as stale when **both** conditions hold:
-- `best_20min × 0.95 > current_FTP × 1.05` (implied FTP exceeds current by >5%)
-- ≥2 sessions with 20-min best exceeding `current_FTP × 1.05`
+1.  **Implied FTP exceeds current by >5%:** Calculated using the **"Sliding Scale"** methodology for any near-maximal or "to failure" effort between 20 and 60 minutes.
+2.  **Consistency:** ≥2 independent sessions show this implied improvement.
 
-**False-positive avoidance**: A single exceptional ride (pacing anomaly, segment effort, short race) is insufficient — two independent sessions are required. This prevents over-reacting to a one-off all-out effort.
+### The Sliding Scale Methodology
+(Cross-reference: [Athlete Profile Evaluation Methodology](../cycling-athlete-profile/SKILL.md#evaluation-methodology-the-sliding-scale))
 
-When stale: suggest `round(best_20min × 0.95)` as the new FTP. Verify with a proper 20-min test before updating.
+For efforts between 20 and 60 minutes, use linear interpolation to derive implied FTP:
+- **20 min:** 95.0% of avg power
+- **60 min:** 100.0% of avg power
+- **Formula:** `implied_FTP = avg_power * (0.95 + (duration_min - 20) * 0.00125)`
+
+*Example:* A 40-minute "to failure" effort at 300W implies an FTP of `300 * (0.95 + (40-20) * 0.00125)` = `300 * 0.975` = **292.5 W**.
+
+**False-positive avoidance**: A single exceptional ride is insufficient — two independent sessions (or one formal test + one field proxy) are required to confirm staleness. This prevents over-reacting to one-off efforts or environmental assists (e.g. strong tailwinds on long segments).
+
+When stale: suggest the new `implied_FTP` based on the most representative "to failure" effort.
+
+## FTP Update Protocol: "The Three-File Rule"
+
+If the user **accepts** an FTP update, you MUST update the following three files in a single turn to ensure system-wide consistency:
+
+1.  **`athlete.json`**: Update the `"ftp"` field (the machine-readable source of truth).
+2.  **`cycling-athlete-profile/FTP_HISTORY.md`**: Append a new entry to the chronological log.
+3.  **`cycling-athlete-profile/SKILL.md`**: Update the "Key Numbers" and recalculate all Coggan Power Zones.
+
+Do NOT update one without the others.
 
 ## Progress Tracking Interpretation
 

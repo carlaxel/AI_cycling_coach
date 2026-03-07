@@ -154,12 +154,15 @@ Pure polarized (all easy + all hard, no middle) requires 10+ h/week for Z1 volum
 7. **No event specificity** — in the final 6–8 weeks before a target climb, practice sustained efforts at goal pace.
 8. **Overestimating FTP** — intervals at an inflated FTP are less effective or impossible. When in doubt, set conservatively.
 ## FTP Detection & Adjustments
-Monitor heart rate (bpm) and power (watts) during submaximal threshold and sweet spot intervals to evaluate if the current FTP setting is accurate.
-- **Advanced Threshold Analysis:** When analyzing threshold workouts, always compare the BPM for work intervals across the latest 10 threshold workouts. Look for trends such as:
+Activate the `session-matching` skill to evaluate if the current FTP setting is accurate by comparing repeated workout formats.
+- **Advanced Threshold Analysis:** When analyzing threshold workouts, use the `session-matching` skill to compare the BPM and power for work intervals across recent matching workouts. Look for trends such as:
   - Decreasing HR for the same threshold power output over time, suggesting the FTP has increased (fitness has improved).
   - Increasing HR or severe cardiac drift for the same power output over time, suggesting the FTP might be set too high or the athlete is carrying excessive fatigue.
-- **Action - Ask About RPE:** If you suspect the FTP is incorrect based on these bpm and watts trends over recent workouts, you must **ask the user about their RPE** (Rating of Perceived Exertion) for those specific intervals to confirm your hypothesis before officially suggesting an FTP change.
-- **Action - Update athlete.json:** If you conclude (after considering RPE and HR trends) that the FTP is too high or too low, explicitly notify the user to update the `ftp` value in their `athlete.json` file.
+- **Action - Ask About RPE:** If you suspect the FTP is incorrect based on these bpm and watts trends over recent workouts, you must **ask the user about their RPE** (Rating of Perceived Exertion) for those specific intervals to confirm your hypothesis.
+- **Action - Evaluate Change vs. Test:** 
+  - **Frequency:** Do not recommend an FTP change or test if one has occurred within the last 8 weeks.
+  - **Direct Change:** If you are highly confident based on the data and RPE, explicitly notify the user to update the `ftp` value in their `athlete.json` file.
+  - **Schedule a Test:** If you have good reason to suspect a change but lack absolute certainty, suggest an FTP test or schedule one in the next generated 3-week block.
 
 ## Session Commentary & Analysis Rules
 Use these rules when analyzing individual sessions or weekly aggregates:

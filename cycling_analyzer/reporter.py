@@ -254,11 +254,10 @@ def _interval_execution_section(ia: IntervalAnalysis, ftp: int) -> list[str]:
             for w in wi
             if w.avg_heart_rate and w.avg_heart_rate > 0
         ]
-        if len(hr_ratios) >= 2:
-            ratio_change = (hr_ratios[-1] - hr_ratios[0]) / hr_ratios[0] * 100
+        if len(hr_ratios) >= 2 and ia.pwhr_drift_pct is not None:
             lines.append(
-                f"- **Power:HR ratio:** {hr_ratios[0]:.2f} → {hr_ratios[-1]:.2f} W/bpm "
-                f"({ratio_change:+.1f}%)"
+                f"- **Interval Decoupling (Pw:HR):** {ia.pwhr_drift_pct:+.1f}% "
+                f"({hr_ratios[0]:.2f} → {hr_ratios[-1]:.2f} W/bpm)"
             )
 
     lines.append("")
@@ -1244,7 +1243,7 @@ def generate_weekly_summary(
 
     # Sessions table
     lines += ["## Sessions", ""]
-    lines += ["| Date | Type | Duration | NP | IF | TSS | Flags |", "|---|---|---|---|---|---|---|"]
+    lines += ["| Date | Type | Duration | NP | IF | TSS | Fade | Compliance | Pw:HR | Flags |", "|---|---|---|---|---|---|---|---|---|---|"]
     for (r, _), cls in zip(paired, classifications):
         dt = r.workout.session.start_time
         date_str = dt.strftime("%Y-%m-%d") if dt else "—"
@@ -1252,6 +1251,16 @@ def generate_weekly_summary(
         np_str = f"{r.normalized_power:.0f} W" if r.normalized_power is not None else "—"
         if_str = f"{r.intensity_factor:.3f}" if r.intensity_factor is not None else "—"
         tss_str = f"{r.tss:.0f}" if r.tss is not None else "—"
+        
+        fade_str = "—"
+        comp_str = "—"
+        pwhr_str = "—"
+        if getattr(r, "interval_analysis", None):
+            fade_str = f"{r.interval_analysis.fade_pct:+.1f}%"
+            comp_str = f"{r.interval_analysis.compliance_pct:.0f}%"
+            if r.interval_analysis.pwhr_drift_pct is not None:
+                pwhr_str = f"{r.interval_analysis.pwhr_drift_pct:+.1f}%"
+
         flags = []
         if cls.is_muddle:
             flags.append("muddle")
@@ -1261,7 +1270,7 @@ def generate_weekly_summary(
             flags.append(f"TSS {cls.tss_status.lower()}")
         flags_str = ", ".join(flags) if flags else "—"
         lines.append(
-            f"| {date_str} | {cls.session_type} | {dur} | {np_str} | {if_str} | {tss_str} | {flags_str} |"
+            f"| {date_str} | {cls.session_type} | {dur} | {np_str} | {if_str} | {tss_str} | {fade_str} | {comp_str} | {pwhr_str} | {flags_str} |"
         )
     lines.append("")
 

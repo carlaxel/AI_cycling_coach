@@ -1,0 +1,42 @@
+# Gemini ignore file
+# This file tells Gemini which files to ignore.
+# By explicitly creating this, Gemini will use these rules INSTEAD of .gitignore.
+# We do NOT include the personal training data here so Gemini can read them,
+# even though git ignores them.
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environment
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local env/secrets
+.env
+.env.local
+
+# Note: We specifically EXCLUDE the following from being ignored by Gemini,
+# even though they are in .gitignore, so the AI can analyze them:
+# fit_files/
+# data/
+# reports/
+# workout_plans/
+# athlete.json
+# .claude/skills/cycling-athlete-profile/
+# .claude/memory/

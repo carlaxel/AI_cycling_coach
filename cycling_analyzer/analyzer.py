@@ -63,6 +63,7 @@ class IntervalAnalysis:
     compliance_pct: float  # % of intervals within target
     mean_deviation_watts: float  # mean absolute deviation from target midpoint
     cardiac_drift_pct: Optional[float] = None  # HR change first → last work interval
+    pwhr_drift_pct: Optional[float] = None  # Aerobic decoupling across intervals
 
 
 @dataclass
@@ -154,6 +155,12 @@ def _analyze_intervals(workout: WorkoutData, ftp: int) -> Optional[IntervalAnaly
     if len(hrs) >= 2 and hrs[0] and hrs[0] > 0:
         cardiac_drift = round((hrs[-1] - hrs[0]) / hrs[0] * 100, 1)
 
+    # Aerobic decoupling across intervals (Pw:HR)
+    pwhr_drift = None
+    efs = [wi.efficiency_factor for wi in work_intervals if wi.efficiency_factor is not None]
+    if len(efs) >= 2 and efs[0] and efs[0] > 0:
+        pwhr_drift = round(((efs[0] - efs[-1]) / efs[0]) * 100, 1)
+
     return IntervalAnalysis(
         work_intervals=work_intervals,
         mean_work_power=round(mean_power, 1),
@@ -162,6 +169,7 @@ def _analyze_intervals(workout: WorkoutData, ftp: int) -> Optional[IntervalAnaly
         compliance_pct=round(compliance, 1),
         mean_deviation_watts=round(mean_dev, 1),
         cardiac_drift_pct=cardiac_drift,
+        pwhr_drift_pct=pwhr_drift,
     )
 
 
