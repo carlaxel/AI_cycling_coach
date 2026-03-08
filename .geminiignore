@@ -33,10 +33,10 @@ venv/
 
 # Note: We specifically EXCLUDE the following from being ignored by Gemini,
 # even though they are in .gitignore, so the AI can analyze them:
-# fit_files/
-# data/
-# reports/
-# workout_plans/
-# athlete.json
-# .claude/skills/cycling-athlete-profile/
-# .claude/memory/
+!fit_files/
+!data/
+!reports/
+!workout_plans/
+!athlete.json
+!.claude/skills/cycling-athlete-profile/
+!.claude/memory/

@@ -37,9 +37,11 @@ cycling_power_ai/
 │   └── fitness_history.json
 └── reports/                # ← NOT included (generated — created automatically)
     └── YYYY/
-        └── YYYY-WNN/
-            ├── session_YYYY-MM-DD_HH-MM.md
-            └── weekly_summary.md
+        ├── WNN/
+        │   ├── session_YYYY-MM-DD.md
+        │   └── weekly_summary.md
+        └── block_reports/
+            └── block_YYYY-MM-DD.json
 ```
 
 ## Setup

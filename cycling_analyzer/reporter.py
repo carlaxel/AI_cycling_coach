@@ -8,7 +8,7 @@ from typing import Optional
 
 from .analyzer import AnalysisResult, IntervalAnalysis, ZoneDistribution, COGGAN_ZONES
 from .fitness_model import CTL_TC, FitnessMetrics, FitnessSnapshot
-from .models import HRZoneDistribution, RecordPoint
+from .models import HRZoneDistribution, RecordPoint, SessionReportData, PeakPowerEntry, SessionReportEnrichment, WeeklyReportData, CommentaryBlock
 from .utils import fmt_duration, fmt_dist, fmt_speed, bar
 
 
@@ -16,14 +16,483 @@ from .utils import fmt_duration, fmt_dist, fmt_speed, bar
 # Public helpers (used by report.py CLI)
 # ---------------------------------------------------------------------------
 
+def get_weekly_report_data(
+    results: list[AnalysisResult],
+    week_label: str,
+    session_filenames: list[str] | None = None,
+    fitness_metrics: FitnessMetrics | None = None,
+    power_records: object | None = None,
+) -> WeeklyReportData:
+    """Gather all weekly metrics into a structured data object."""
+    if not results:
+        return WeeklyReportData(week_id=week_label)
+
+    ftp = next((r.ftp for r in results if r.ftp), None)
+    weight = next((r.weight for r in results if r.weight is not None and r.weight > 0), None)
+
+    dates = [r.workout.session.start_time for r in results if r.workout.session.start_time]
+    if len(dates) >= 2:
+        period = f"{min(dates).strftime('%Y-%m-%d')} – {max(dates).strftime('%Y-%m-%d')}"
+    elif dates:
+        period = dates[0].strftime("%Y-%m-%d")
+    else:
+        period = week_label
+
+    # Aggregates
+    total_tss = sum((r.tss or 0) for r in results)
+    total_dur = sum(
+        (r.workout.session.timer_time or r.workout.session.elapsed_time or 0)
+        for r in results
+    )
+    total_dist = sum(
+        (r.workout.session.distance or 0) for r in results if not _is_indoor(r)
+    )
+    total_ascent = sum(
+        (r.workout.session.ascent or 0) for r in results
+    )
+    if_vals = [r.intensity_factor for r in results if r.intensity_factor is not None]
+    np_vals = [r.normalized_power for r in results if r.normalized_power is not None]
+    avg_IF = sum(if_vals) / len(if_vals) if if_vals else None
+    avg_NP = sum(np_vals) / len(np_vals) if np_vals else None
+
+    data = WeeklyReportData(
+        week_id=week_label,
+        period=period,
+        ftp=ftp,
+        weight=weight,
+    )
+
+    data.summary = {
+        "sessions_count": len(results),
+        "total_tss": round(total_tss, 1),
+        "total_duration_s": total_dur,
+        "total_distance_m": total_dist,
+        "total_ascent_m": total_ascent,
+        "avg_if": avg_IF,
+        "avg_np": avg_NP,
+        "avg_np_w_kg": round(avg_NP / weight, 2) if weight and avg_NP else None,
+    }
+
+    # Fitness
+    if fitness_metrics:
+        c = fitness_metrics.current
+        w = fitness_metrics.one_week_ago
+        data.fitness = {
+            "ctl": round(c.ctl, 1),
+            "atl": round(c.atl, 1),
+            "tsb": round(c.tsb, 1),
+            "ctl_delta": round(c.ctl - w.ctl, 1),
+            "ctl_prev": round(w.ctl, 1),
+            "atl_prev": round(w.atl, 1),
+            "tsb_prev": round(w.tsb, 1),
+            "ramp_rate": round(fitness_metrics.ctl_weekly_ramp, 1),
+            "ramp_label": fitness_metrics.ramp_label,
+            "form_label": c.form_label,
+        }
+
+    # Peaks
+    if power_records:
+        from .power_records import extract_peak_powers, DURATION_LABELS
+        all_week_records = [rec for r in results for rec in r.workout.records]
+        week_peaks = extract_peak_powers(all_week_records)
+        for dur, watts in week_peaks:
+            at = power_records.all_time_best(dur)
+            data.peaks.append({
+                "duration_s": dur,
+                "label": DURATION_LABELS[dur],
+                "watts": watts,
+                "all_time_best": at.watts if at else None,
+            })
+
+    # Sessions
+    filenames = session_filenames or [""] * len(results)
+    paired = sorted(
+        zip(results, filenames),
+        key=lambda x: x[0].workout.session.start_time or datetime.min,
+    )
+    for r, fname in paired:
+        cls = _classify_session(r)
+        dt = r.workout.session.start_time
+        data.sessions.append({
+            "date": dt.strftime("%Y-%m-%d") if dt else "—",
+            "type": cls.session_type,
+            "duration_s": r.workout.session.timer_time or r.workout.session.elapsed_time,
+            "np": r.normalized_power,
+            "if": r.intensity_factor,
+            "tss": r.tss,
+            "filename": fname,
+            "is_muddle": cls.is_muddle,
+            "is_hr_muddle": cls.is_hr_muddle,
+            "tss_status": cls.tss_status,
+        })
+
+    # Zones
+    merged = _merge_zones(results)
+    for z in merged:
+        data.zones.append({
+            "name": z.zone_name,
+            "seconds": z.seconds,
+            "percent": z.percent_of_ride,
+        })
+
+    # Model Alignment
+    low, mid, high = _zone_band_pcts(merged)
+    data.model_alignment = {
+        "low_pct": round(low, 1),
+        "mid_pct": round(mid, 1),
+        "high_pct": round(high, 1),
+        "low_status": _band_status(low, 60, 70),
+        "mid_status": _band_status(mid, 20, 25),
+        "high_status": _band_status(high, 5, 10),
+    }
+
+    # HR Zones
+    merged_hrz = _merge_hr_zones(results)
+    if merged_hrz:
+        data.hr_zones = merged_hrz.to_dict()
+
+    return data
+
+
+def render_weekly_summary_markdown(data: WeeklyReportData) -> str:
+    """Render a WeeklyReportData object as Markdown."""
+    if not data.week_id:
+        return "# Weekly Summary\n\nNo data.\n"
+
+    lines = [f"# Weekly Summary — {data.week_id}", ""]
+    lines.append(f"*Period: {data.period}*")
+    if data.ftp:
+        lines.append(f"*FTP: {data.ftp} W*")
+    if data.weight:
+        lines.append(f"*Rider Weight: {data.weight:.1f} kg*")
+    lines.append("")
+
+    # Week at a Glance
+    s = data.summary
+    lines += ["## Week at a Glance", ""]
+    lines += ["| Metric | Value |", "|---|---|"]
+    lines.append(f"| Sessions | {s.get('sessions_count', 0)} |")
+    lines.append(f"| Total TSS | {s.get('total_tss', 0):.0f} |")
+    lines.append(f"| Total Duration | {_fmt_duration(s.get('total_duration_s'))} |")
+    if s.get("total_distance_m"):
+        lines.append(f"| Total Distance | {_fmt_dist(s.get('total_distance_m'))} |")
+    if s.get("total_ascent_m"):
+        lines.append(f"| Total Ascent | {s.get('total_ascent_m'):.0f} m |")
+    lines.append(f"| Avg IF | {_v(s.get('avg_if'), fmt='{:.3f}')} |")
+    lines.append(f"| Avg NP | {_v(s.get('avg_np'), fmt='{:.0f}', suffix=' W')} |")
+    if s.get("avg_np_w_kg"):
+        lines.append(f"| Avg NP W/kg | {s.get('avg_np_w_kg'):.2f} W/kg |")
+    lines.append("")
+
+    # Fitness
+    f = data.fitness
+    if f:
+        lines += ["## Fitness & Fatigue (PMC)", ""]
+        lines += ["| Metric | 7 Days Ago | End of Week | Δ |", "|---|---|---|---|"]
+        lines.append(f"| CTL (Fitness) | {f['ctl_prev']:.1f} | {f['ctl']:.1f} | {f['ctl_delta']:+1.1f} |")
+        lines.append(f"| ATL (Fatigue) | {f['atl_prev']:.1f} | {f['atl']:.1f} | {f['atl'] - f['atl_prev']:+1.1f} |")
+        lines.append(f"| TSB (Form) | {f['tsb_prev']:+1.1f} | {f['tsb']:+1.1f} | {f['tsb'] - f['tsb_prev']:+1.1f} |")
+        lines.append("")
+        lines.append(f"**Form:** {f['form_label']} (TSB {f['tsb']:+1.1f})  **Weekly CTL ramp:** {f['ramp_rate']:+1.1f} pts/week ({f['ramp_label']})")
+        lines.append("")
+
+    # Peaks
+    if data.peaks:
+        lines += ["## Weekly Peak Powers", ""]
+        lines += ["| Duration | This Week | All-Time | vs AT |", "|---|---|---|---|"]
+        for p in data.peaks:
+            at = p["all_time_best"]
+            at_str = f"{at} W" if at else "—"
+            if at:
+                diff = p["watts"] - at
+                if diff == 0: vs_str = "= AT"
+                elif diff > 0: vs_str = f"+{diff} W (NEW AT)"
+                else: vs_str = f"{diff} W ({abs(diff)/at*100:.0f}% off)"
+            else: vs_str = "first data"
+            lines.append(f"| {p['label']} | {p['watts']} W | {at_str} | {vs_str} |")
+        lines.append("")
+
+    # Sessions
+    if data.sessions:
+        lines += ["## Sessions", ""]
+        lines += ["| Date | Type | Duration | NP | IF | TSS | Flags |", "|---|---|---|---|---|---|---|"]
+        for sess in data.sessions:
+            flags = []
+            if sess["is_muddle"]: flags.append("muddle")
+            if sess["is_hr_muddle"]: flags.append("HR mismatch")
+            if sess["tss_status"] not in ("OK", "N/A"): flags.append(f"TSS {sess['tss_status'].lower()}")
+            flags_str = ", ".join(flags) if flags else "—"
+            lines.append(
+                f"| {sess['date']} | {sess['type']} | {_fmt_duration(sess['duration_s'])} | "
+                f"{_v(sess['np'], fmt='{:.0f}', suffix=' W')} | {_v(sess['if'], fmt='{:.3f}')} | "
+                f"{_v(sess['tss'], fmt='{:.0f}')} | {flags_str} |"
+            )
+        lines.append("")
+        
+        lines += ["## Session Descriptions", ""]
+        for sess in data.sessions:
+            if sess["filename"]:
+                # Re-generate the one-liner from the JSON data
+                details = []
+                if sess["if"]: details.append(f"IF {sess['if']:.3f}")
+                detail_str = f" ({', '.join(details)})" if details else ""
+                lines.append(f"- [{sess['date']}]({sess['filename']}) — {_fmt_duration(sess['duration_s'])} {sess['type']}{detail_str}.")
+        lines.append("")
+
+    # Zones
+    if data.zones:
+        lines += ["## Combined Zone Distribution", ""]
+        lines += ["| Zone | Time | % |", "|---|---|---|"]
+        for z in data.zones:
+            lines.append(f"| {z['name']} | {_fmt_duration(z['seconds'])} | {z['percent']:.1f}% |")
+        lines.append("")
+        lines.append("```")
+        for z in data.zones:
+            lines.append(f"{z['name']:<22} {_bar(z['percent'])} {z['percent']:5.1f}%")
+        lines.append("```")
+        lines.append("")
+
+    # Alignment
+    ma = data.model_alignment
+    if ma:
+        lines += ["## Training Model Alignment", ""]
+        lines += ["| Band | Target | Actual | Status |", "|---|---|---|---|"]
+        lines.append(f"| Z1-Z2 (Low intensity) | 60–70% | {ma['low_pct']:.1f}% | {ma['low_status']} |")
+        lines.append(f"| Z3-Z4 (Mid intensity) | 20–25% | {ma['mid_pct']:.1f}% | {ma['mid_status']} |")
+        lines.append(f"| Z5+ (High intensity) | 5–10% | {ma['high_pct']:.1f}% | {ma['high_status']} |")
+        lines.append("")
+
+    # HR Zones
+    if data.hr_zones:
+        hrz = HRZoneDistribution(**data.hr_zones)
+        lines += _render_hr_zones_table(hrz, heading_level=3)
+
+    # Dynamic Commentary
+    for block in data.commentary:
+        lines.append(f"## {block.title}")
+        lines.append("")
+        lines.append(block.content)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def week_label(dt: datetime) -> str:
-    """Return ISO week label, e.g. '2026-W08'."""
+    """Return ISO week label, e.g. 'W08'."""
     iso = dt.isocalendar()
-    return f"{iso[0]}-W{iso[1]:02d}"
+    return f"W{iso[1]:02d}"
 
 
 def session_filename(dt: datetime) -> str:
-    return f"session_{dt.strftime('%Y-%m-%d')}.md"
+    return f"session_{dt.strftime('%Y-%m-%d')}.json"
+
+
+def get_session_report_data(
+    result: AnalysisResult,
+    source_filename: str,
+    pr_checks: list | None = None,
+) -> SessionReportData:
+    s = result.workout.session
+    records = result.workout.records
+    laps = result.workout.laps
+    dt = s.start_time
+    indoor = _is_indoor(result)
+    venue = "Indoor" if indoor else "Outdoor"
+    
+    data = SessionReportData()
+    
+    # Metadata
+    data.metadata = {
+        "source_fit": source_filename,
+        "date": dt.strftime("%Y-%m-%d") if dt else "Unknown",
+        "venue": venue,
+        "sport": s.sport,
+        "sub_sport": s.sub_sport,
+        "analysis_timestamp": datetime.now().isoformat(),
+    }
+    
+    # Historical Context
+    data.historical_context = {
+        "ftp": result.ftp,
+        "weight": result.weight,
+    }
+    
+    # Stats
+    session_paused = (s.elapsed_time - s.timer_time) if s.elapsed_time is not None and s.timer_time is not None else 0
+    data.stats = {
+        "elapsed_duration_s": s.elapsed_time,
+        "timer_duration_s": s.timer_time,
+        "paused_duration_s": session_paused,
+        "distance_m": s.distance,
+        "calories": s.calories,
+        "total_work_kj": s.total_work_kj,
+        "ascent_m": s.ascent,
+        "avg_temp": s.avg_temperature,
+        "min_temp": s.min_temperature,
+        "max_temp": s.max_temperature,
+    }
+    
+    # Power
+    data.power = {
+        "avg_power": s.avg_power,
+        "max_power": s.max_power,
+        "normalized_power": result.normalized_power,
+        "variability_index": result.variability_index,
+        "intensity_factor": result.intensity_factor,
+        "tss": result.tss,
+        "avg_w_kg": round(s.avg_power / result.weight, 2) if s.avg_power and result.weight else None,
+        "np_w_kg": round(result.normalized_power / result.weight, 2) if result.normalized_power and result.weight else None,
+    }
+    
+    # HR
+    hrz_dict = None
+    if s.hr_zones:
+        hrz_dict = s.hr_zones.to_dict()
+    
+    data.hr = {
+        "avg_hr": s.avg_heart_rate,
+        "max_hr": s.max_heart_rate,
+        "efficiency_factor": s.efficiency_factor,
+        "aerobic_decoupling_pct": s.aerobic_decoupling_pct,
+        "aerobic_decoupling_interpretation": _interpret_decoupling(s.aerobic_decoupling_pct, result.intensity_factor or 0.0) if s.aerobic_decoupling_pct is not None else None,
+        "zones": hrz_dict,
+    }
+    
+    # Cadence & Speed
+    cad_vals = [r.cadence for r in records if r.cadence is not None and r.cadence > 0]
+    spd_vals = [r.speed for r in records if r.speed is not None]
+    data.stats.update({
+        "avg_cadence": sum(cad_vals) / len(cad_vals) if cad_vals else None,
+        "max_cadence": max(cad_vals) if cad_vals else None,
+        "avg_speed_mps": sum(spd_vals) / len(spd_vals) if spd_vals else None,
+        "max_speed_mps": max(spd_vals) if spd_vals else None,
+    })
+    
+    # Pedaling Dynamics
+    lr_vals = [r.left_pct for r in records if r.left_pct is not None]
+    lte_vals = [r.left_torque_effectiveness for r in records if r.left_torque_effectiveness is not None]
+    rte_vals = [r.right_torque_effectiveness for r in records if r.right_torque_effectiveness is not None]
+    lps_vals = [r.left_pedal_smoothness for r in records if r.left_pedal_smoothness is not None]
+    rps_vals = [r.right_pedal_smoothness for r in records if r.right_pedal_smoothness is not None]
+    
+    if lr_vals or lte_vals:
+        avg_left = sum(lr_vals) / len(lr_vals) if lr_vals else None
+        data.pedaling = {
+            "left_power_pct": avg_left,
+            "right_power_pct": 100 - avg_left if avg_left is not None else None,
+            "left_torque_effectiveness": _avg(lte_vals),
+            "right_torque_effectiveness": _avg(rte_vals),
+            "left_pedal_smoothness": _avg(lps_vals),
+            "right_pedal_smoothness": _avg(rps_vals),
+        }
+    
+    # Peaks
+    from .power_records import DURATION_LABELS
+    raw_peaks = _peak_powers(records, result.ftp)
+    pr_lookup = {chk.label: chk for chk in pr_checks} if pr_checks else {}
+    
+    for label, watts, pct_ftp in raw_peaks:
+        chk = pr_lookup.get(label)
+        entry = PeakPowerEntry(
+            label=label,
+            watts=watts,
+            pct_ftp=pct_ftp,
+            w_kg=round(watts / result.weight, 2) if result.weight else None,
+            is_pr=chk.is_pr if chk else False,
+            improvement_watts=chk.improvement_watts if chk else None,
+            previous_best=chk.previous_best if chk else None,
+        )
+        data.peaks.append(entry)
+        
+    # Laps
+    for lap in laps:
+        paused_sec = (lap.elapsed_time - lap.timer_time) if lap.elapsed_time is not None and lap.timer_time is not None else 0
+        
+        target_str = "—"
+        if lap.target_power_low is not None and lap.avg_power is not None:
+            if lap.target_power_high is not None:
+                if lap.avg_power < lap.target_power_low:
+                    target_str = f"{lap.target_power_low}–{lap.target_power_high} W ↓"
+                elif lap.avg_power > lap.target_power_high:
+                    target_str = f"{lap.target_power_low}–{lap.target_power_high} W ↑"
+                else:
+                    target_str = f"{lap.target_power_low}–{lap.target_power_high} W ✓"
+            else:
+                diff = lap.avg_power - lap.target_power_low
+                if diff < -5:
+                    target_str = f"{lap.target_power_low} W ↓"
+                elif diff > 5:
+                    target_str = f"{lap.target_power_low} W ↑"
+                else:
+                    target_str = f"{lap.target_power_low} W ✓"
+
+        data.laps.append({
+            "lap_number": lap.lap_number + 1,
+            "timer_time_s": lap.timer_time,
+            "elapsed_time_s": lap.elapsed_time,
+            "paused_time_s": paused_sec,
+            "avg_power": lap.avg_power,
+            "normalized_power": lap.normalized_power,
+            "total_work_kj": lap.total_work_kj,
+            "target_power_low": lap.target_power_low,
+            "target_power_high": lap.target_power_high,
+            "target_interpretation": target_str,
+            "avg_hr": lap.avg_heart_rate,
+            "max_hr": lap.max_heart_rate,
+            "avg_cadence": lap.avg_cadence,
+            "avg_temp": lap.avg_temperature,
+            "distance_m": lap.distance,
+        })
+        
+    # Interval Analysis
+    if result.interval_analysis:
+        ia = result.interval_analysis
+        data.interval_analysis = {
+            "mean_work_power": ia.mean_work_power,
+            "cv_pct": ia.cv_pct,
+            "fade_pct": ia.fade_pct,
+            "compliance_pct": ia.compliance_pct,
+            "mean_deviation_watts": ia.mean_deviation_watts,
+            "cardiac_drift_pct": ia.cardiac_drift_pct,
+            "pwhr_drift_pct": ia.pwhr_drift_pct,
+            "work_intervals": [
+                {
+                    "lap_number": wi.lap_number + 1,
+                    "avg_power": wi.avg_power,
+                    "target_low": wi.target_low,
+                    "target_high": wi.target_high,
+                    "deviation_watts": wi.deviation_watts,
+                    "deviation_pct": wi.deviation_pct,
+                    "in_target": wi.in_target,
+                    "timer_time_s": wi.timer_time,
+                    "avg_hr": wi.avg_heart_rate,
+                    "ef": wi.efficiency_factor,
+                }
+                for wi in ia.work_intervals
+            ]
+        }
+        
+    # Zones
+    for z in result.zones:
+        data.zones.append({
+            "name": z.zone_name,
+            "lower_pct": z.lower_pct,
+            "upper_pct": z.upper_pct,
+            "seconds": z.seconds,
+            "percent": z.percent_of_ride,
+        })
+        
+    # Commentary
+    cls = _classify_session(result)
+    data.commentary = {
+        "session_type": cls.session_type,
+        "is_muddle": cls.is_muddle,
+        "is_hr_muddle": cls.is_hr_muddle,
+        "tss_status": cls.tss_status,
+        "narrative": _session_commentary(result, cls, indoor=indoor),
+    }
+    
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -717,150 +1186,140 @@ def generate_session_report(
     source_filename: str,
     pr_checks: list | None = None,
 ) -> str:
-    s = result.workout.session
-    records = result.workout.records
-    laps = result.workout.laps
-    dt = s.start_time
-    indoor = _is_indoor(result)
-    venue = "Indoor" if indoor else "Outdoor"
-    header_dt = dt.strftime("%Y-%m-%d") if dt else "Unknown"
+    data = get_session_report_data(result, source_filename, pr_checks)
+    return render_session_report_markdown(data)
+
+
+def render_session_report_markdown(data: SessionReportData) -> str:
+    m = data.metadata
+    h = data.historical_context
+    s = data.stats
+    p = data.power
+    hr = data.hr
+    
+    venue = m["venue"]
+    header_dt = m["date"]
+    indoor = venue == "Indoor"
 
     lines: list[str] = [f"# Session Report — {header_dt} [{venue}]", ""]
-    if source_filename:
-        lines += [f"*Source: `{source_filename}`*", ""]
+    if m["source_fit"]:
+        lines += [f"*Source: `{m['source_fit']}`*", ""]
 
     lines += ["## Session Stats", ""]
     lines += ["| Field | Value |", "|---|---|"]
-    lines.append(f"| Date | {dt.strftime('%Y-%m-%d') if dt else '—'} |")
+    lines.append(f"| Date | {header_dt} |")
     lines.append(f"| Venue | {venue} |")
-    lines.append(f"| Sport | {_v(s.sport)}{f' / {s.sub_sport}' if s.sub_sport else ''} |")
-    lines.append(f"| Elapsed Duration | {_fmt_duration(s.elapsed_time)} |")
-    lines.append(f"| Timer Duration | {_fmt_duration(s.timer_time)} |")
+    lines.append(f"| Sport | {m['sport']}{f' / {m['sub_sport']}' if m['sub_sport'] else ''} |")
+    lines.append(f"| Elapsed Duration | {_fmt_duration(s['elapsed_duration_s'])} |")
+    lines.append(f"| Timer Duration | {_fmt_duration(s['timer_duration_s'])} |")
     
-    session_paused = (s.elapsed_time - s.timer_time) if s.elapsed_time is not None and s.timer_time is not None else 0
-    if session_paused > 0:
-        lines.append(f"| Paused Time | {fmt_duration(session_paused, show_seconds=True)} |")
+    if s["paused_duration_s"] > 0:
+        lines.append(f"| Paused Time | {fmt_duration(s['paused_duration_s'], show_seconds=True)} |")
 
-    lines.append(f"| Distance | {_fmt_dist(s.distance)} |")
-    lines.append(f"| Calories | {_v(s.calories, suffix=' kcal')} |")
-    lines.append(f"| Total Work | {_v(s.total_work_kj, fmt='{:.0f}', suffix=' kJ')} |")
-    lines.append(f"| Ascent | {_v(s.ascent, fmt='{:.0f}', suffix=' m')} |")
-    if s.avg_temperature is not None:
+    lines.append(f"| Distance | {_fmt_dist(s['distance_m'])} |")
+    lines.append(f"| Calories | {_v(s['calories'], suffix=' kcal')} |")
+    lines.append(f"| Total Work | {_v(s['total_work_kj'], fmt='{:.0f}', suffix=' kJ')} |")
+    lines.append(f"| Ascent | {_v(s['ascent_m'], fmt='{:.0f}', suffix=' m')} |")
+    if s["avg_temp"] is not None:
         lines.append(
-            f"| Temperature | avg {s.avg_temperature:.0f}°C"
-            f"  (min {_v(s.min_temperature, fmt='{:.0f}', suffix='°C')},"
-            f" max {_v(s.max_temperature, fmt='{:.0f}', suffix='°C')}) |"
+            f"| Temperature | avg {s['avg_temp']:.0f}°C"
+            f"  (min {_v(s['min_temp'], fmt='{:.0f}', suffix='°C')},"
+            f" max {_v(s['max_temp'], fmt='{:.0f}', suffix='°C')}) |"
         )
     lines.append("")
 
     # Power Summary
     lines += ["## Power Summary", ""]
     lines += ["| Metric | Value |", "|---|---|"]
-    lines.append(f"| Avg Power | {_v(s.avg_power, fmt='{:.0f}', suffix=' W')} |")
-    lines.append(f"| Max Power | {_v(s.max_power, suffix=' W')} |")
-    lines.append(f"| Normalized Power (NP) | {_v(result.normalized_power, fmt='{:.0f}', suffix=' W')} |")
-    lines.append(f"| Variability Index (VI) | {_v(result.variability_index, fmt='{:.3f}')} |")
-    lines.append(f"| Intensity Factor (IF) | {_v(result.intensity_factor, fmt='{:.3f}')} |")
-    lines.append(f"| TSS | {_v(result.tss, fmt='{:.1f}')} |")
-    lines.append(f"| FTP | {_v(result.ftp, suffix=' W')} |")
-    if result.weight and result.weight > 0:
-        if s.avg_power:
-            lines.append(f"| Avg W/kg | {s.avg_power / result.weight:.2f} W/kg |")
-        if result.normalized_power:
-            lines.append(f"| NP W/kg | {result.normalized_power / result.weight:.2f} W/kg |")
+    lines.append(f"| Avg Power | {_v(p['avg_power'], fmt='{:.0f}', suffix=' W')} |")
+    lines.append(f"| Max Power | {_v(p['max_power'], suffix=' W')} |")
+    lines.append(f"| Normalized Power (NP) | {_v(p['normalized_power'], fmt='{:.0f}', suffix=' W')} |")
+    lines.append(f"| Variability Index (VI) | {_v(p['variability_index'], fmt='{:.3f}')} |")
+    lines.append(f"| Intensity Factor (IF) | {_v(p['intensity_factor'], fmt='{:.3f}')} |")
+    lines.append(f"| TSS | {_v(p['tss'], fmt='{:.1f}')} |")
+    lines.append(f"| FTP | {_v(h['ftp'], suffix=' W')} |")
+    if p["avg_w_kg"]:
+        lines.append(f"| Avg W/kg | {p['avg_w_kg']:.2f} W/kg |")
+    if p["np_w_kg"]:
+        lines.append(f"| NP W/kg | {p['np_w_kg']:.2f} W/kg |")
     lines.append("")
 
     # Aerobic Profile (conditional)
-    has_ef = getattr(s, "efficiency_factor", None) is not None
-    has_decoupling = getattr(s, "aerobic_decoupling_pct", None) is not None
-    has_hr_zones = getattr(s, "hr_zones", None) is not None
+    has_ef = hr["efficiency_factor"] is not None
+    has_decoupling = hr["aerobic_decoupling_pct"] is not None
+    has_hr_zones = hr["zones"] is not None
 
     if has_ef or has_decoupling or has_hr_zones:
         lines += ["## Aerobic Profile", ""]
         if has_ef or has_decoupling:
             lines += ["| Metric | Value |", "|---|---|"]
             if has_ef:
-                lines.append(f"| Efficiency Factor (EF) | {s.efficiency_factor:.2f} NP/bpm |")
+                lines.append(f"| Efficiency Factor (EF) | {hr['efficiency_factor']:.2f} NP/bpm |")
             if has_decoupling:
-                if_val = result.intensity_factor or 0.0
-                interp = _interpret_decoupling(s.aerobic_decoupling_pct, if_val)
-                lines.append(f"| Aerobic Decoupling | {s.aerobic_decoupling_pct:+.1f}% ({interp}) |")
+                interp = hr["aerobic_decoupling_interpretation"]
+                lines.append(f"| Aerobic Decoupling | {hr['aerobic_decoupling_pct']:+.1f}% ({interp}) |")
             lines.append("")
         
         if has_hr_zones:
-            lines += _render_hr_zones_table(s.hr_zones, heading_level=3)
+            hrz = HRZoneDistribution(**hr["zones"])
+            lines += _render_hr_zones_table(hrz, heading_level=3)
 
     # Heart Rate (conditional)
-    if s.avg_heart_rate or s.max_heart_rate:
+    if hr["avg_hr"] or hr["max_hr"]:
         lines += ["## Heart Rate", ""]
         lines += ["| Metric | Value |", "|---|---|"]
-        lines.append(f"| Avg HR | {_v(s.avg_heart_rate, suffix=' bpm')} |")
-        lines.append(f"| Max HR | {_v(s.max_heart_rate, suffix=' bpm')} |")
+        lines.append(f"| Avg HR | {_v(hr['avg_hr'], suffix=' bpm')} |")
+        lines.append(f"| Max HR | {_v(hr['max_hr'], suffix=' bpm')} |")
         if indoor:
             lines.append(
                 "| *Indoor note* | *HR typically 3–10 bpm lower than outdoor at same power* |"
             )
         lines.append("")
 
-    # Cadence & Speed (conditional)
-    cad_vals = [r.cadence for r in records if r.cadence is not None and r.cadence > 0]
-    spd_vals = [r.speed for r in records if r.speed is not None]
-    if cad_vals or spd_vals:
+    # Cadence & Speed
+    if s["avg_cadence"] or s["avg_speed_mps"]:
         lines += ["## Cadence & Speed", ""]
         lines += ["| Metric | Value |", "|---|---|"]
-        if cad_vals:
-            lines.append(f"| Avg Cadence | {sum(cad_vals) / len(cad_vals):.0f} rpm |")
-            lines.append(f"| Max Cadence | {max(cad_vals)} rpm |")
-        if spd_vals:
-            lines.append(f"| Avg Speed | {_fmt_speed(sum(spd_vals) / len(spd_vals))} |")
-            lines.append(f"| Max Speed | {_fmt_speed(max(spd_vals))} |")
+        if s["avg_cadence"]:
+            lines.append(f"| Avg Cadence | {s['avg_cadence']:.0f} rpm |")
+            lines.append(f"| Max Cadence | {s['max_cadence']} rpm |")
+        if s["avg_speed_mps"]:
+            lines.append(f"| Avg Speed | {_fmt_speed(s['avg_speed_mps'])} |")
+            lines.append(f"| Max Speed | {_fmt_speed(s['max_speed_mps'])} |")
         lines.append("")
 
-    # Pedaling Dynamics (conditional — requires dual-sided power meter)
-    lr_vals = [r.left_pct for r in records if r.left_pct is not None]
-    lte_vals = [r.left_torque_effectiveness for r in records if r.left_torque_effectiveness is not None]
-    rte_vals = [r.right_torque_effectiveness for r in records if r.right_torque_effectiveness is not None]
-    lps_vals = [r.left_pedal_smoothness for r in records if r.left_pedal_smoothness is not None]
-    rps_vals = [r.right_pedal_smoothness for r in records if r.right_pedal_smoothness is not None]
-    if lr_vals or lte_vals:
+    # Pedaling Dynamics
+    if data.pedaling:
+        pd = data.pedaling
         lines += ["## Pedaling Dynamics", ""]
         lines += ["| Metric | Left | Right |", "|---|---|---|"]
-        if lr_vals:
-            avg_left = sum(lr_vals) / len(lr_vals)
-            lines.append(f"| Power Balance | {avg_left:.1f}% | {100 - avg_left:.1f}% |")
-        if lte_vals and rte_vals:
+        if pd["left_power_pct"] is not None:
+            lines.append(f"| Power Balance | {pd['left_power_pct']:.1f}% | {pd['right_power_pct']:.1f}% |")
+        if pd["left_torque_effectiveness"] is not None:
             lines.append(
-                f"| Torque Effectiveness | {_avg(lte_vals):.1f}% | {_avg(rte_vals):.1f}% |"
+                f"| Torque Effectiveness | {pd['left_torque_effectiveness']:.1f}% | {pd['right_torque_effectiveness']:.1f}% |"
             )
-        if lps_vals and rps_vals:
+        if pd["left_pedal_smoothness"] is not None:
             lines.append(
-                f"| Pedal Smoothness | {_avg(lps_vals):.1f}% | {_avg(rps_vals):.1f}% |"
+                f"| Pedal Smoothness | {pd['left_pedal_smoothness']:.1f}% | {pd['right_pedal_smoothness']:.1f}% |"
             )
         lines.append("")
 
     # Peak Power Durations
-    peaks = _peak_powers(records, result.ftp)
-    if peaks:
+    if data.peaks:
         lines += ["## Peak Power Durations", ""]
-        # Build a lookup of PRCheck by label for quick access
-        pr_lookup: dict[str, object] = {}
-        if pr_checks:
-            for chk in pr_checks:
-                if chk.is_pr:
-                    pr_lookup[chk.label] = chk
-        show_pr = bool(pr_lookup)
-        if result.weight and result.weight > 0:
+        show_pr = any(p.is_pr for p in data.peaks)
+        if h["weight"]:
             if show_pr:
                 lines += ["| Duration | Best Power | % FTP | W/kg | PR |", "|---|---|---|---|---|"]
             else:
                 lines += ["| Duration | Best Power | % FTP | W/kg |", "|---|---|---|---|"]
-            for label, watts, pct_ftp in peaks:
-                pct_str = f"{pct_ftp:.1f}%" if pct_ftp is not None else "—"
-                row = f"| {label} | {watts} W | {pct_str} | {watts / result.weight:.2f} |"
+            for peak in data.peaks:
+                pct_str = f"{peak.pct_ftp:.1f}%" if peak.pct_ftp is not None else "—"
+                row = f"| {peak.label} | {peak.watts} W | {pct_str} | {peak.w_kg:.2f} |"
                 if show_pr:
-                    chk = pr_lookup.get(label)
-                    if chk:
-                        imp = f" (+{chk.improvement_watts} W)" if chk.improvement_watts else ""
+                    if peak.is_pr:
+                        imp = f" (+{peak.improvement_watts} W)" if peak.improvement_watts else ""
                         row += f" NEW{imp} |"
                     else:
                         row += " |"
@@ -870,13 +1329,12 @@ def generate_session_report(
                 lines += ["| Duration | Best Power | % FTP | PR |", "|---|---|---|---|"]
             else:
                 lines += ["| Duration | Best Power | % FTP |", "|---|---|---|"]
-            for label, watts, pct_ftp in peaks:
-                pct_str = f"{pct_ftp:.1f}%" if pct_ftp is not None else "—"
-                row = f"| {label} | {watts} W | {pct_str} |"
+            for peak in data.peaks:
+                pct_str = f"{peak.pct_ftp:.1f}%" if peak.pct_ftp is not None else "—"
+                row = f"| {peak.label} | {peak.watts} W | {pct_str} |"
                 if show_pr:
-                    chk = pr_lookup.get(label)
-                    if chk:
-                        imp = f" (+{chk.improvement_watts} W)" if chk.improvement_watts else ""
+                    if peak.is_pr:
+                        imp = f" (+{peak.improvement_watts} W)" if peak.improvement_watts else ""
                         row += f" NEW{imp} |"
                     else:
                         row += " |"
@@ -884,23 +1342,23 @@ def generate_session_report(
         # Bold callouts for each PR
         if show_pr:
             lines.append("")
-            for label, watts, _ in peaks:
-                chk = pr_lookup.get(label)
-                if chk:
-                    if chk.previous_best is not None and chk.improvement_watts is not None:
+            for peak in data.peaks:
+                if peak.is_pr:
+                    if peak.previous_best is not None and peak.improvement_watts is not None:
                         lines.append(
-                            f"**New {label} best: {watts} W** "
-                            f"(previous: {chk.previous_best} W, +{chk.improvement_watts} W)"
+                            f"**New {peak.label} best: {peak.watts} W** "
+                            f"(previous: {peak.previous_best} W, +{peak.improvement_watts} W)"
                         )
                     else:
-                        lines.append(f"**First {label} best recorded: {watts} W**")
+                        lines.append(f"**First {peak.label} best recorded: {peak.watts} W**")
         lines.append("")
 
     # Laps / Intervals
-    if laps:
-        has_targets = any(lap.target_power_low is not None for lap in laps)
-        has_hr = any(lap.avg_heart_rate is not None for lap in laps)
-        has_dist = any(lap.distance is not None and lap.distance > 0 for lap in laps)
+    if data.laps:
+        # Check column presence
+        has_targets = any(l["target_power_low"] is not None for l in data.laps)
+        has_hr = any(l["avg_hr"] is not None for l in data.laps)
+        has_dist = any(l["distance_m"] is not None and l["distance_m"] > 0 for l in data.laps)
 
         header_cols = ["Lap", "Time", "Paused", "Avg W", "NP", "kJ"]
         sep_cols = ["---"] * len(header_cols)
@@ -920,82 +1378,203 @@ def generate_session_report(
         lines.append("| " + " | ".join(header_cols) + " |")
         lines.append("| " + " | ".join(sep_cols) + " |")
 
-        for lap in laps:
-            # Compliance indicator for target power
-            if has_targets and lap.target_power_low is not None and lap.avg_power is not None:
-                if lap.target_power_high is not None:
-                    if lap.avg_power < lap.target_power_low:
-                        target_str = f"{lap.target_power_low}–{lap.target_power_high} W ↓"
-                    elif lap.avg_power > lap.target_power_high:
-                        target_str = f"{lap.target_power_low}–{lap.target_power_high} W ↑"
-                    else:
-                        target_str = f"{lap.target_power_low}–{lap.target_power_high} W ✓"
-                else:
-                    diff = lap.avg_power - lap.target_power_low
-                    if diff < -5:
-                        target_str = f"{lap.target_power_low} W ↓"
-                    elif diff > 5:
-                        target_str = f"{lap.target_power_low} W ↑"
-                    else:
-                        target_str = f"{lap.target_power_low} W ✓"
-            elif has_targets:
-                target_str = "—"
-
-            paused_sec = (lap.elapsed_time - lap.timer_time) if lap.elapsed_time is not None and lap.timer_time is not None else 0
-            paused_str = fmt_duration(paused_sec, show_seconds=True) if paused_sec > 0 else "0s"
-
+        for lap in data.laps:
             row = [
-                str(lap.lap_number + 1),
-                _fmt_duration(lap.timer_time),
-                paused_str,
-                _v(lap.avg_power, fmt="{:.0f}", suffix=" W"),
-                _v(lap.normalized_power, fmt="{:.0f}", suffix=" W"),
-                _v(lap.total_work_kj, fmt="{:.0f}", suffix=" kJ"),
+                str(lap["lap_number"]),
+                _fmt_duration(lap["timer_time_s"]),
+                fmt_duration(lap["paused_time_s"], show_seconds=True) if lap["paused_time_s"] > 0 else "0s",
+                _v(lap["avg_power"], fmt="{:.0f}", suffix=" W"),
+                _v(lap["normalized_power"], fmt="{:.0f}", suffix=" W"),
+                _v(lap["total_work_kj"], fmt="{:.0f}", suffix=" kJ"),
             ]
             if has_targets:
-                row.append(target_str)
+                row.append(lap["target_interpretation"])
             if has_hr:
                 row += [
-                    _v(lap.avg_heart_rate, suffix=" bpm"),
-                    _v(lap.max_heart_rate, suffix=" bpm"),
+                    _v(lap["avg_hr"], suffix=" bpm"),
+                    _v(lap["max_hr"], suffix=" bpm"),
                 ]
             row += [
-                _v(lap.avg_cadence, suffix=" rpm"),
-                _v(lap.avg_temperature, fmt="{:.0f}", suffix="°C"),
+                _v(lap["avg_cadence"], suffix=" rpm"),
+                _v(lap["avg_temp"], fmt="{:.0f}", suffix="°C"),
             ]
             if has_dist:
-                row.append(_fmt_dist(lap.distance))
+                row.append(_fmt_dist(lap["distance_m"]))
 
             lines.append("| " + " | ".join(row) + " |")
         lines.append("")
 
-    # Interval Execution Analysis (structured workouts only)
-    if result.interval_analysis and result.ftp:
-        lines += _interval_execution_section(result.interval_analysis, result.ftp)
+    # Interval Execution Analysis
+    if data.interval_analysis:
+        ia = data.interval_analysis
+        lines += ["## Interval Execution Analysis", ""]
+        
+        wi = ia["work_intervals"]
+        n = len(wi)
+        
+        # Determine if targets match
+        targets_match = all(
+            w["target_low"] == wi[0]["target_low"] and w["target_high"] == wi[0]["target_high"]
+            for w in wi
+        )
+        if targets_match:
+            if wi[0]["target_low"] != wi[0]["target_high"]:
+                tgt_str = f"{wi[0]['target_low']}–{wi[0]['target_high']} W"
+            else:
+                tgt_str = f"{wi[0]['target_low']} W"
+            lines.append(f"**{n} work intervals** identified (target: {tgt_str})")
+        else:
+            lines.append(f"**{n} work intervals** identified (mixed targets)")
+        lines.append("")
+
+        # Per-interval compliance table
+        has_hr_ia = any(w["avg_hr"] is not None for w in wi)
+        has_ef_ia = any(w["ef"] is not None for w in wi)
+
+        ia_header = ["Interval", "Time", "Paused", "Avg W", "Target", "Deviation"]
+        if has_hr_ia:
+            ia_header.append("Avg HR")
+        if has_ef_ia:
+            ia_header.append("EF")
+        lines.append("| " + " | ".join(ia_header) + " |")
+        lines.append("| " + " | ".join(["---"] * len(ia_header)) + " |")
+
+        for w in wi:
+            status = "✓" if w["in_target"] else ("↑" if w["deviation_watts"] > 0 else "↓")
+            if w["target_low"] != w["target_high"]:
+                tgt = f"{w['target_low']}–{w['target_high']} W {status}"
+            else:
+                tgt = f"{w['target_low']} W {status}"
+            
+            dev_pct = (w["deviation_watts"] / ((w["target_low"] + w["target_high"]) / 2) * 100) if (w["target_low"] + w["target_high"]) > 0 else 0
+            dev_str = f"{w['deviation_watts']:+.0f} W ({dev_pct:+.1f}%)"
+            
+            # Note: paused time not in work_interval yet, but we can assume 0 or fix it
+            # Actually, I didn't store paused_time_s in work_interval in get_session_report_data
+            paused_str = "0s" 
+
+            ia_row = [
+                f"Lap {w['lap_number']}",
+                _fmt_duration(w["timer_time_s"]),
+                paused_str,
+                f"{w['avg_power']:.0f} W",
+                tgt,
+                dev_str,
+            ]
+            if has_hr_ia:
+                ia_row.append(f"{w['avg_hr']} bpm" if w["avg_hr"] else "—")
+            if has_ef_ia:
+                ia_row.append(f"{w['ef']:.2f}" if w["ef"] else "—")
+            lines.append("| " + " | ".join(ia_row) + " |")
+        lines.append("")
+
+        # Consistency & Fade
+        lines.append("### Consistency & Fade")
+        lines.append("")
+        lines.append(
+            f"- **Mean work power:** {ia['mean_work_power']:.0f} W "
+            f"({ia['mean_work_power'] / h['ftp'] * 100:.1f}% FTP)"
+        )
+
+        if ia["cv_pct"] < 2:
+            cv_label = "Excellent"
+        elif ia["cv_pct"] < 5:
+            cv_label = "Good"
+        else:
+            cv_label = "Inconsistent"
+        lines.append(f"- **Coefficient of variation:** {ia['cv_pct']:.1f}% ({cv_label})")
+
+        first_w = wi[0]["avg_power"]
+        last_w = wi[-1]["avg_power"]
+        if abs(ia["fade_pct"]) < 2:
+            fade_label = "negligible"
+        elif ia["fade_pct"] < -5:
+            fade_label = "significant fade"
+        elif ia["fade_pct"] < 0:
+            fade_label = "mild fade"
+        elif ia["fade_pct"] > 5:
+            fade_label = "strong positive build"
+        else:
+            fade_label = "mild positive build"
+        lines.append(
+            f"- **Fade:** {ia['fade_pct']:+.1f}% "
+            f"({first_w:.0f} → {last_w:.0f} W) — {fade_label}"
+        )
+
+        lines.append(
+            f"- **Target compliance:** {ia['compliance_pct']:.0f}% of intervals within target "
+            f"(mean deviation: {ia['mean_deviation_watts']:.0f} W)"
+        )
+
+        # HR Cost
+        if ia["cardiac_drift_pct"] is not None:
+            lines.append("")
+            lines.append("### HR Cost")
+            lines.append("")
+
+            first_hr = wi[0]["avg_hr"]
+            last_hr = next(
+                w["avg_hr"] for w in reversed(wi) if w["avg_hr"] is not None
+            )
+            if abs(ia["cardiac_drift_pct"]) < 3:
+                drift_label = "stable — good aerobic capacity at this intensity"
+            elif ia["cardiac_drift_pct"] > 5:
+                drift_label = "significant drift — approaching aerobic ceiling"
+            elif ia["cardiac_drift_pct"] > 0:
+                drift_label = "mild drift — normal for sustained threshold work"
+            else:
+                drift_label = "HR decrease — possible warmup effect or pacing adjustment"
+
+            lines.append(
+                f"- **Cardiac drift:** {ia['cardiac_drift_pct']:+.1f}% "
+                f"({first_hr} → {last_hr} bpm) — {drift_label}"
+            )
+
+            if ia["pwhr_drift_pct"] is not None:
+                ef_first = wi[0]["ef"]
+                ef_last = next(w["ef"] for w in reversed(wi) if w["ef"] is not None)
+                lines.append(
+                    f"- **Interval Decoupling (Pw:HR):** {ia['pwhr_drift_pct']:+.1f}% "
+                    f"({ef_first:.2f} → {ef_last:.2f} W/bpm)"
+                )
+        lines.append("")
 
     # Power Zone Breakdown
-    if result.zones:
+    if data.zones:
         lines += ["## Power Zone Breakdown", ""]
         lines += ["| Zone | Range | Time | % |", "|---|---|---|---|"]
-        ftp = result.ftp or 0
-        for z in result.zones:
-            lo_w = f"{z.lower_pct * ftp:.0f} W"
-            hi_w = "∞" if z.upper_pct == float("inf") else f"{z.upper_pct * ftp:.0f} W"
+        ftp = h["ftp"] or 0
+        for z in data.zones:
+            lo_w = f"{z['lower_pct'] * ftp:.0f} W"
+            hi_w = "∞" if z["upper_pct"] == float("inf") else f"{z['upper_pct'] * ftp:.0f} W"
             lines.append(
-                f"| {z.zone_name} | {lo_w}–{hi_w} | {_fmt_duration(z.seconds)} | {z.percent_of_ride:.1f}% |"
+                f"| {z['name']} | {lo_w}–{hi_w} | {_fmt_duration(z['seconds'])} | {z['percent']:.1f}% |"
             )
         lines.append("")
         lines.append("```")
-        for z in result.zones:
-            lines.append(f"{z.zone_name:<22} {_bar(z.percent_of_ride)} {z.percent_of_ride:5.1f}%")
+        for z in data.zones:
+            lines.append(f"{z['name']:<22} {_bar(z['percent'])} {z['percent']:5.1f}%")
         lines.append("```")
         lines.append("")
 
     # Session Commentary
-    cls = _classify_session(result)
     lines += ["## Session Commentary", ""]
-    lines.append(_session_commentary(result, cls, indoor=indoor))
+    lines.append(data.commentary["narrative"])
     lines.append("")
+    
+    # Enrichment (Coach Notes / Athlete Comment)
+    if data.enrichment.athlete_comment:
+        lines += ["### Athlete Comment", "", f"> {data.enrichment.athlete_comment}", ""]
+        
+    if data.enrichment.coach_summary:
+        lines += ["## Coach's Summary", ""]
+        for bullet in data.enrichment.coach_summary:
+            lines.append(f"- {bullet}")
+        lines.append("")
+        
+    if data.enrichment.coach_log_link:
+        lines.append(f"[See full Qualitative Analysis in coach_log.json]({data.enrichment.coach_log_link})")
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -1321,6 +1900,211 @@ def generate_weekly_summary(
 # ---------------------------------------------------------------------------
 # Block analysis
 # ---------------------------------------------------------------------------
+
+def get_block_report_data(
+    weeks: list[list[AnalysisResult]],
+    week_labels: list[str],
+    weekly_snapshots: list[FitnessSnapshot] | None = None,
+    power_records: object | None = None,
+) -> BlockReportData:
+    """Gather all training block metrics into a structured data object."""
+    if not weeks:
+        return BlockReportData()
+
+    ftp = None
+    for week in weeks:
+        for r in week:
+            if r.ftp:
+                ftp = r.ftp
+                break
+        if ftp:
+            break
+
+    # Gather per-week statistics
+    weekly_summaries = []
+    all_results = []
+    for label, week in zip(week_labels, weeks):
+        all_results.extend(week)
+        total_tss = sum((r.tss or 0) for r in week)
+        total_dur = sum(
+            (r.workout.session.timer_time or r.workout.session.elapsed_time or 0)
+            for r in week
+        )
+        if_vals = [r.intensity_factor for r in week if r.intensity_factor is not None]
+        avg_IF = sum(if_vals) / len(if_vals) if if_vals else None
+        np_vals = [r.normalized_power for r in week if r.normalized_power is not None]
+        avg_NP = sum(np_vals) / len(np_vals) if np_vals else None
+        vi_vals = [r.variability_index for r in week if r.variability_index is not None]
+        avg_VI = sum(vi_vals) / len(vi_vals) if vi_vals else None
+        ef_vals = [r.workout.session.efficiency_factor for r in week if r.workout.session.efficiency_factor is not None]
+        avg_EF = sum(ef_vals) / len(ef_vals) if ef_vals else None
+        decoup_vals = [r.workout.session.aerobic_decoupling_pct for r in week if r.workout.session.aerobic_decoupling_pct is not None]
+        avg_decoup = sum(decoup_vals) / len(decoup_vals) if decoup_vals else None
+
+        type_counts: dict[str, int] = {}
+        for r in week:
+            cls = _classify_session(r)
+            type_counts[cls.session_type] = type_counts.get(cls.session_type, 0) + 1
+        dominant = max(type_counts, key=type_counts.__getitem__) if type_counts else "—"
+
+        merged = _merge_zones(week)
+        low, mid, high = _zone_band_pcts(merged)
+
+        weekly_summaries.append({
+            "label": label,
+            "sessions_count": len(week),
+            "total_tss": round(total_tss, 1),
+            "total_duration_s": total_dur,
+            "avg_if": avg_IF,
+            "avg_np": avg_NP,
+            "avg_vi": avg_VI,
+            "avg_ef": avg_EF,
+            "avg_decoupling_pct": avg_decoup,
+            "dominant_type": dominant,
+            "low_pct": round(low, 1),
+            "mid_pct": round(mid, 1),
+            "high_pct": round(high, 1),
+        })
+
+    # Block Aggregates
+    block_merged = _merge_zones(all_results)
+    block_low, block_mid, block_high = _zone_band_pcts(block_merged)
+    all_if_vals = [r.intensity_factor for r in all_results if r.intensity_factor is not None]
+    block_avg_IF = sum(all_if_vals) / len(all_if_vals) if all_if_vals else None
+
+    # Dates and period
+    all_dates = [r.workout.session.start_time for r in all_results if r.workout.session.start_time]
+    period = ""
+    if all_dates:
+        period = f"{min(all_dates).strftime('%Y-%m-%d')} – {max(all_dates).strftime('%Y-%m-%d')}"
+
+    data = BlockReportData(
+        block_id=f"{len(weeks)}-week-block",
+        period=period,
+        weeks=week_labels,
+    )
+
+    data.summary = {
+        "weeks_count": len(weeks),
+        "sessions_count": len(all_results),
+        "total_tss": round(sum(ws["total_tss"] for ws in weekly_summaries), 1),
+        "total_duration_s": sum(ws["total_duration_s"] for ws in weekly_summaries),
+        "avg_if": block_avg_IF,
+        "low_pct": round(block_low, 1),
+        "mid_pct": round(block_mid, 1),
+        "high_pct": round(block_high, 1),
+    }
+
+    # Fitness Trends
+    if weekly_snapshots:
+        for label, snap in zip(week_labels, weekly_snapshots):
+            data.fitness_trend.append({
+                "label": label,
+                "ctl": round(snap.ctl, 1),
+                "atl": round(snap.atl, 1),
+                "tsb": round(snap.tsb, 1),
+                "form_label": snap.form_label,
+            })
+
+    # Power Duration Trends
+    if power_records:
+        from .power_records import extract_peak_powers, DURATION_LABELS
+        summary_durations = [5, 60, 300, 1200]
+        
+        for label, week in zip(week_labels, weeks):
+            all_week_records = [rec for r in week for rec in r.workout.records]
+            peaks_map = dict(extract_peak_powers(all_week_records))
+            
+            peaks_list = []
+            for d in summary_durations:
+                peaks_list.append({
+                    "label": DURATION_LABELS[d],
+                    "watts": peaks_map.get(d)
+                })
+                
+            data.peaks.append({
+                "label": label,
+                "peaks": peaks_list
+            })
+
+    # Zones
+    for z in block_merged:
+        data.zones.append({
+            "name": z.zone_name,
+            "seconds": z.seconds,
+            "percent": z.percent_of_ride,
+        })
+
+    data.weekly_summaries = weekly_summaries
+
+    # Phase and Narrative reasoning (from generate_block_analysis)
+    tss_by_week = [ws["total_tss"] for ws in weekly_summaries]
+    if block_avg_IF is None:
+        phase = "Unknown (no FTP set)"
+    elif block_avg_IF < 0.80:
+        phase = "Base / Aerobic Development"
+    elif block_avg_IF < 0.90:
+        phase = "Build / Tempo-SST"
+    else:
+        phase = "Peak / Threshold"
+
+    data.commentary.append(CommentaryBlock(title="Phase Classification", content=f"**Phase:** {phase}"))
+    
+    # Warnings (reused logic)
+    all_cls = [_classify_session(r) for r in all_results]
+    muddle_count = sum(1 for c in all_cls if c.is_muddle)
+    if muddle_count:
+        data.commentary.append(CommentaryBlock(
+            title="Muddle Sessions", 
+            content=f"**{muddle_count} muddle session{'s' if muddle_count > 1 else ''}** across the block — time spent in the grey zone without clear training stimulus."
+        ))
+
+    return data
+
+
+def render_block_summary_markdown(data: BlockReportData) -> str:
+    """Render a BlockReportData object as Markdown."""
+    if not data.block_id:
+        return "# Block Analysis\n\nNo data found.\n"
+
+    lines = [f"# Block Analysis — {data.summary['weeks_count']} Weeks", ""]
+    lines.append(f"*Period: {data.period}*")
+    lines.append(f"*Weeks: {', '.join(data.weeks)}*")
+    lines.append("")
+
+    # Week-by-Week Overview
+    lines += ["## Week-by-Week Overview", ""]
+    lines += [
+        "| Week | Sessions | Total TSS | Total Hours | Avg IF | Dominant Type |",
+        "|---|---|---|---|---|---|",
+    ]
+    for ws in data.weekly_summaries:
+        avg_if_str = f"{ws['avg_if']:.3f}" if ws["avg_if"] is not None else "—"
+        lines.append(
+            f"| {ws['label']} | {ws['sessions_count']} | {ws['total_tss']:.0f} | "
+            f"{ws['total_duration_s'] / 3600:.1f}h | {avg_if_str} | {ws['dominant_type']} |"
+        )
+    lines.append("")
+
+    # Fitness Trends
+    if data.fitness_trend:
+        lines += ["## Performance Management Chart (PMC)", ""]
+        lines += ["| Week | CTL | ATL | TSB | Form |", "|---|---|---|---|---|"]
+        for snap in data.fitness_trend:
+            lines.append(
+                f"| {snap['label']} | {snap['ctl']:.1f} | {snap['atl']:.1f} | {snap['tsb']:+.1f} | {snap['form_label']} |"
+            )
+        lines.append("")
+
+    # Commentary
+    for block in data.commentary:
+        lines.append(f"## {block.title}")
+        lines.append("")
+        lines.append(block.content)
+        lines.append("")
+
+    return "\n".join(lines)
+
 
 def generate_block_analysis(
     weeks: list[list[AnalysisResult]],

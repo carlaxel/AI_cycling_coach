@@ -1,0 +1,20 @@
+{
+  "week_id": "YYYY-WXX",
+  "period": "YYYY-MM-DD – YYYY-MM-DD",
+  "athlete": {
+    "weight_kg": 95,
+    "ftp_w": 290
+  },
+  "sessions": [
+    {
+      "date": "YYYY-MM-DD",
+      "title": "Session Title",
+      "analysis": {
+        "plan_compliance": "Qualitative analysis of how the ride matched the plan.",
+        "execution_quality": "Detailed notes on pacing, fade, consistency, and HR cost.",
+        "physiological_response": "Interpretation of decoupling, EF, and fatigue markers.",
+        "coach_takeaway": "Optional: specific advice or block context notes."
+      }
+    }
+  ]
+}

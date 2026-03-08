@@ -13,6 +13,8 @@ from cycling_analyzer.fitness_model import FitnessHistory
 from cycling_analyzer.power_records import PowerRecords, extract_peak_powers
 from cycling_analyzer.reporter import (
     session_filename,
+    get_session_report_data,
+    render_session_report_markdown,
     week_label,
     collect_code_observations,
     generate_block_analysis,
@@ -34,14 +36,22 @@ def cmd_session(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     result = analyze(workout, ftp=args.ftp, weight=args.weight)
-    content = generate_session_report(result, fit_path.name)
-
+    
+    # Generate structured data
+    report_data = get_session_report_data(result, fit_path.name)
+    
     if args.output:
         output_path = Path(args.output)
+        # Always output as JSON if output is specified, regardless of suffix
+        if output_path.suffix != ".json":
+            output_path = output_path.with_suffix(".json")
+            
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(content, encoding="utf-8")
-        print(f"Session report written to {output_path}")
+        output_path.write_text(json.dumps(report_data.to_dict(), indent=2), encoding="utf-8")
+        print(f"Session data (JSON) written to {output_path}")
     else:
+        # If no output specified, still print markdown to stdout for CLI convenience
+        content = render_session_report_markdown(report_data)
         print(content)
 
 
@@ -71,23 +81,26 @@ def cmd_week(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # Group results by their actual ISO week
+    # Key is "YYYY-WNN" to keep years separate, but we extract labels for folder naming
     weeks: dict[str, list[tuple[Path, object]]] = defaultdict(list)
     for fit_path, result in results:
-        dt = result.workout.session.start_time
-        label = week_label(dt) if dt else week_label(datetime.now())
-        weeks[label].append((fit_path, result))
+        dt = result.workout.session.start_time or datetime.now()
+        iso = dt.isocalendar()
+        key = f"{iso[0]}-W{iso[1]:02d}"
+        weeks[key].append((fit_path, result))
 
     history = FitnessHistory(Path("data/fitness_history.json"))
     power_records = PowerRecords(Path("data/power_records.json"))
 
     summaries: list[str] = []
-    for current_week, week_results in sorted(weeks.items()):
+    for current_week_key, week_results in sorted(weeks.items()):
         # Create output directories
-        year = current_week[:4]
-        week_reports_dir = reports_dir / year / current_week
+        year = current_week_key[:4]
+        label = current_week_key[5:] # e.g., "W10"
+        week_reports_dir = reports_dir / year / label
         week_reports_dir.mkdir(parents=True, exist_ok=True)
 
-        processed_dir = fit_dir / "processed" / current_week
+        processed_dir = fit_dir / "processed" / year / label
         processed_dir.mkdir(parents=True, exist_ok=True)
 
         # Write session reports (with PR detection)
@@ -96,9 +109,12 @@ def cmd_week(args: argparse.Namespace) -> None:
             peaks = extract_peak_powers(result.workout.records)
             pr_checks = power_records.check_prs(dt.isoformat(), peaks)
             power_records.upsert(dt.isoformat(), peaks)
+            
+            # Generate structured data
+            report_data = get_session_report_data(result, fit_path.name, pr_checks=pr_checks)
+            
             filename = session_filename(dt)
-            content = generate_session_report(result, fit_path.name, pr_checks=pr_checks)
-            (week_reports_dir / filename).write_text(content, encoding="utf-8")
+            (week_reports_dir / filename).write_text(json.dumps(report_data.to_dict(), indent=2), encoding="utf-8")
 
         # Include already-archived .fit files for the same week in the summary
         extra_results: list[object] = []
@@ -135,22 +151,54 @@ def cmd_week(args: argparse.Namespace) -> None:
             session_filename(r.workout.session.start_time or datetime.now())
             for r in all_results
         ]
-        summary = generate_weekly_summary(
-            all_results, current_week,
+        
+        # New JSON-first lifecycle
+        from cycling_analyzer.reporter import get_weekly_report_data, render_weekly_summary_markdown
+        from cycling_analyzer.models import WeeklyReportData, CommentaryBlock
+        
+        json_path = week_reports_dir / "weekly_report.json"
+        existing_data = None
+        if json_path.exists():
+            try:
+                raw = json.loads(json_path.read_text(encoding="utf-8"))
+                # Basic migration if it was an old format, but here we assume the new one
+                existing_data = raw
+            except Exception:
+                pass
+
+        # Generate fresh metrics
+        report_data = get_weekly_report_data(
+            all_results, label,
             session_filenames=session_filenames,
             fitness_metrics=fitness_metrics,
             power_records=power_records,
         )
-        (week_reports_dir / "weekly_summary.md").write_text(summary, encoding="utf-8")
+        
+        # Merge commentary from existing JSON if present
+        if existing_data and "commentary" in existing_data:
+            fresh_titles = {c.title for c in report_data.commentary}
+            for block_dict in existing_data["commentary"]:
+                if block_dict["title"] not in fresh_titles:
+                    report_data.commentary.append(CommentaryBlock(
+                        title=block_dict["title"],
+                        content=block_dict["content"]
+                    ))
+
+        # Save unified JSON
+        json_path.write_text(json.dumps(report_data.to_dict(), indent=2), encoding="utf-8")
+        
+        # Generate Markdown view from the JSON
+        summary_md = render_weekly_summary_markdown(report_data)
+        (week_reports_dir / "weekly_summary.md").write_text(summary_md, encoding="utf-8")
 
         # Append code/data observations to global improvements file
-        obs = collect_code_observations(all_results, current_week)
+        obs = collect_code_observations(all_results, label)
         if obs:
             improvements_path = Path("code_improvements.md")
             header = "# Code & Data Improvements\n\n"
             existing = improvements_path.read_text(encoding="utf-8") if improvements_path.exists() else header
-            entry = f"## {current_week}\n\n" + "\n".join(f"- {o}" for o in obs) + "\n\n"
-            if f"## {current_week}" not in existing:
+            entry = f"## {current_week_key}\n\n" + "\n".join(f"- {o}" for o in obs) + "\n\n"
+            if f"## {current_week_key}" not in existing:
                 improvements_path.write_text(existing + entry, encoding="utf-8")
 
         # Archive .fit files to processed/
@@ -159,7 +207,7 @@ def cmd_week(args: argparse.Namespace) -> None:
 
         n = len(week_results)
         summaries.append(
-            f"  {current_week}: {n} session report{'s' if n != 1 else ''} → {week_reports_dir}/"
+            f"  {current_week_key}: {n} session report{'s' if n != 1 else ''} → {week_reports_dir}/"
         )
 
     history.save()
@@ -187,13 +235,16 @@ def cmd_block(args: argparse.Namespace) -> None:
         sys.exit(0)
 
     # Parse, analyze, group by ISO week
+    # Key is "YYYY-WNN" to keep years separate
     weeks: dict[str, list] = defaultdict(list)
     for fit_path in all_fits:
         try:
             workout = parse_fit_file(fit_path)
             result = analyze(workout, ftp=args.ftp, weight=args.weight)
             dt = result.workout.session.start_time or datetime.now()
-            weeks[week_label(dt)].append(result)
+            iso = dt.isocalendar()
+            key = f"{iso[0]}-W{iso[1]:02d}"
+            weeks[key].append(result)
         except Exception as e:
             print(f"Warning: failed to parse {fit_path.name}: {e}", file=sys.stderr)
 
@@ -201,8 +252,10 @@ def cmd_block(args: argparse.Namespace) -> None:
         print("No files could be parsed.", file=sys.stderr)
         sys.exit(1)
 
-    sorted_labels = sorted(weeks.keys())
-    sorted_weeks = [weeks[label] for label in sorted_labels]
+    sorted_keys = sorted(weeks.keys())
+    sorted_weeks = [weeks[key] for key in sorted_keys]
+    # For display in the block report, we use the WNN labels
+    sorted_labels = [k[5:] for k in sorted_keys] # Extract "WNN" from "YYYY-WNN"
 
     # Build/update fitness history and power records from all sessions
     history = FitnessHistory(Path("data/fitness_history.json"))
@@ -229,7 +282,10 @@ def cmd_block(args: argparse.Namespace) -> None:
     # Only pass if all weeks have snapshots
     snapshots_arg = weekly_snapshots if all(s is not None for s in weekly_snapshots) else None
 
-    report = generate_block_analysis(
+    # New JSON-first lifecycle
+    from cycling_analyzer.reporter import get_block_report_data, render_block_summary_markdown
+    
+    report_data = get_block_report_data(
         sorted_weeks, sorted_labels,
         weekly_snapshots=snapshots_arg,
         power_records=power_records,
@@ -238,11 +294,15 @@ def cmd_block(args: argparse.Namespace) -> None:
     reports_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
     year = today[:4]
-    output_path = reports_dir / year / f"block_{today}.md"
-    (reports_dir / year).mkdir(parents=True, exist_ok=True)
-    output_path.write_text(report, encoding="utf-8")
-
-    print(f"Block analysis written to {output_path}")
+    block_reports_dir = reports_dir / year / "block_reports"
+    block_reports_dir.mkdir(parents=True, exist_ok=True)
+    output_base = block_reports_dir / f"block_{today}"
+    
+    # Save JSON
+    json_path = output_base.with_suffix(".json")
+    json_path.write_text(json.dumps(report_data.to_dict(), indent=2), encoding="utf-8")
+    
+    print(f"Block analysis written to {json_path}")
 
 
 def _load_athlete() -> dict:

@@ -1,0 +1,110 @@
+.viewerContainer {
+  background-color: var(--card-bg);
+  border-radius: 0.5rem;
+  border: 1px solid var(--border-color);
+  padding: 1.25rem;
+  max-width: 1000px;
+  margin: 0 auto;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.markdown {
+  font-size: 0.95rem;
+  color: var(--text-color);
+  line-height: 1.5;
+}
+
+.markdown h1 {
+  font-size: 1.75rem;
+  margin-top: 1rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.markdown h2 {
+  font-size: 1.25rem;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.markdown h3 {
+  font-size: 1.1rem;
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.markdown p {
+  margin-bottom: 0.5rem;
+}
+
+.markdown ul, .markdown ol {
+  margin-bottom: 0.5rem;
+  padding-left: 1.5rem;
+}
+
+.markdown li {
+  margin-bottom: 0.125rem;
+}
+
+.markdown blockquote {
+  border-left: 4px solid var(--border-color);
+  padding-left: 1rem;
+  color: #6b7280;
+  margin-bottom: 0.5rem;
+}
+
+.markdown pre {
+  background-color: var(--code-bg);
+  padding: 0.75rem;
+  border-radius: 0.375rem;
+  overflow-x: auto;
+  margin-bottom: 0.5rem;
+}
+
+.markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.875rem;
+  background-color: var(--code-bg);
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+}
+
+.markdown pre code {
+  background-color: transparent;
+  padding: 0;
+}
+
+.markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.25rem;
+  font-size: 0.8rem;
+  line-height: 1.1;
+}
+
+.markdown th, .markdown td {
+  border: 1px solid var(--border-color);
+  padding: 0.125rem 0.375rem;
+  text-align: left;
+}
+
+.markdown td {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.markdown th {
+  background-color: var(--sidebar-bg);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.markdown {
+  overflow-x: auto;
+}
+
+/* Ensure large tables don't break the layout */
+.markdown table-container {
+  overflow-x: auto;
+  margin-bottom: 1.5rem;
+}

@@ -13,13 +13,13 @@ Activate the `cycling-athlete-profile` and `fitness-fatigue-model` skills to det
 - **Current FTP:** Verify the current working FTP (e.g., 290 W).
 
 ### B. Multi-Block Retrospective & Trend Analysis
-Activate the `session-matching`, `interval-execution-analysis`, `fitness-fatigue-model`, and `heart-rate-aerobic-efficiency` skills to audit the prior **two blocks** (6-8 weeks). **You MUST read the 2 most recent Block Reports (e.g., `reports/YYYY/block_*.md` or similar) and the relevant Weekly Summaries to inform this analysis:**
+Activate the `session-matching`, `interval-execution-analysis`, `fitness-fatigue-model`, and `heart-rate-aerobic-efficiency` skills to audit the prior **two blocks** (6-8 weeks). **You MUST read the 2 most recent Block Reports (e.g., `reports/YYYY/block_reports/block_*.md` or similar) and the relevant Weekly Summaries (found in `weekly_report.json` and `weekly_summary.md`) to inform this analysis:**
 - **Fatigue Check:** Check current TSB and ATL. If TSB is deeply negative (< -20) or ATL is chronically elevated, starting volume must be adjusted.
 - **Phenotype & Adaptation Trend:** Evaluate Aerobic Decoupling (Pw:HR) and Fade Index trends across the last TWO blocks. Are they improving or degrading? Do not build a new progression on a short-term anomaly or a false peak. Ensure improvements are sustained over the macro-cycle.
-- **Execution Quality:** Evaluate primary interval sessions based on the weekly summaries.
+- **Execution Quality:** Evaluate primary interval sessions based on the weekly summaries and coach logs.
   - Was Target Compliance > 75%?
   - Was the Fade Index > 5%?
-- **Coach's Notes & Strategy:** Review the "Weekly Critique" and "Qualitative Analysis" in the weekly summaries, and the strategy for the next mesocycle dictated by the block reports.
+- **Coach's Notes & Strategy:** Review the "Weekly Critique" (stored as `CommentaryBlock` objects in `weekly_report.json`) and "Qualitative Analysis" (found in `coach_log.json`) for the relevant weeks, and the strategy for the next mesocycle dictated by the block reports.
 - **Adaptive Adjustment:** If the athlete struggled (high fade, low compliance, high cardiac drift) in the previous block's progression (e.g., 3x15m SST), the new block **must not** progress to harder intervals (e.g., 2x30m SST) until the previous target is consolidated.
 
 ### C. Plan vs. Actual Data Integrity Audit
